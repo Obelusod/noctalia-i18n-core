@@ -16,6 +16,39 @@ from .fixtures import RUN_AT, delivery
 
 
 class StateTests(unittest.TestCase):
+    def test_incompatible_schema_is_rejected_without_modification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.sqlite3"
+            with closing(sqlite3.connect(path)) as database:
+                database.executescript(
+                    """
+                    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    CREATE TABLE delivery_receipts (
+                        route_id TEXT NOT NULL,
+                        change_id TEXT NOT NULL,
+                        delivered_at TEXT NOT NULL,
+                        PRIMARY KEY(route_id, change_id)
+                    );
+                    CREATE TABLE baseline_notifications (
+                        route_id TEXT PRIMARY KEY,
+                        delivered_at TEXT NOT NULL
+                    );
+                    CREATE TABLE outbox (
+                        route_id TEXT NOT NULL,
+                        change_id TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        queued_at TEXT NOT NULL,
+                        PRIMARY KEY(route_id, change_id)
+                    );
+                    """
+                )
+            original = path.read_bytes()
+
+            with self.assertRaisesRegex(RuntimeError, "schema is incompatible"):
+                SQLiteState(path)
+
+            self.assertEqual(path.read_bytes(), original)
+
     def test_database_errors_do_not_escape_the_state_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.sqlite3"

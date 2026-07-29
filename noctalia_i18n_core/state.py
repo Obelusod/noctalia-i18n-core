@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS outbox_route_queued_at
     ON outbox(route_id, queued_at);
 """
+_SCHEMA_COLUMNS = {
+    "baseline_notifications": ("route_id", "delivered_at"),
+    "delivery_receipts": ("route_id", "change_id", "delivered_at"),
+    "meta": ("key", "value"),
+    "outbox": ("route_id", "change_id", "delivery", "queued_at"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +188,7 @@ class SQLiteState:
                     f"{path.resolve().as_uri()}?mode=ro", uri=True
                 )
                 self._db.execute("PRAGMA query_only=ON")
+                self._validate_schema()
                 return
 
             if read_only:
@@ -190,6 +197,8 @@ class SQLiteState:
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 self._db = sqlite3.connect(path)
+                if self._tables():
+                    self._validate_schema()
                 self._db.execute("PRAGMA journal_mode=WAL")
                 self._db.execute("PRAGMA synchronous=FULL")
             self._db.executescript(_SCHEMA)
@@ -440,6 +449,25 @@ class SQLiteState:
             "DELETE FROM outbox WHERE route_id = ? AND change_id = ?",
             ((route_id, change_id) for change_id in change_ids),
         )
+
+    def _tables(self) -> set[str]:
+        return {
+            str(row[0])
+            for row in self._db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+    def _validate_schema(self) -> None:
+        if self._tables() != _SCHEMA_COLUMNS.keys():
+            raise RuntimeError("State database schema is incompatible")
+        for table, expected in _SCHEMA_COLUMNS.items():
+            columns = tuple(
+                str(row[1]) for row in self._db.execute(f"PRAGMA table_info({table})")
+            )
+            if columns != expected:
+                raise RuntimeError("State database schema is incompatible")
 
     def _get(self, key: str, default: JsonValue = None) -> JsonValue:
         row = self._db.execute(
