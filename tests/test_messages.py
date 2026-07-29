@@ -124,7 +124,7 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(
             linked.get("description"),
             (
-                "[fixture.translation.description]"
+                "[`fixture.translation.description`]"
                 "(https://fixtures.invalid/changes/fixture.translation.description) "
                 "Fixture modified value"
             ),
