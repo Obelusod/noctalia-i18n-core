@@ -133,6 +133,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _count(value: int, singular: str, plural: str | None = None) -> str:
+    return f"{value} {singular if value == 1 else plural or singular + 's'}"
+
+
 def _advance_source_texts(
     previous: Mapping[str, str],
     result: PollResult,
@@ -251,7 +255,7 @@ class Monitor:
             return
 
         if result.changes:
-            _LOGGER.info("Found %d new changes", len(result.changes))
+            _LOGGER.info("Found %s", _count(len(result.changes), "new change"))
         current = _advance_source_texts(checkpoint.source_texts, result)
         observed_at = self._clock()
         if observed_at.utcoffset() is None:
@@ -267,7 +271,10 @@ class Monitor:
         self._state.prune(self._retention_days)
         collected = sum(len(items) for items in queued.values())
         if collected:
-            _LOGGER.info("Collected %d route deliveries", collected)
+            _LOGGER.info(
+                "Collected %s",
+                _count(collected, "route delivery", "route deliveries"),
+            )
         else:
             _LOGGER.debug("Collection completed without routed changes")
 
@@ -318,10 +325,10 @@ class Monitor:
         )
         self._state.prune(self._retention_days)
         _LOGGER.info(
-            "%s reset created a baseline from %d changes and %d source texts",
-            mode,
-            result.scanned,
-            len(texts),
+            "%s reset created a baseline from %s and %s",
+            mode.capitalize(),
+            _count(result.scanned, "change"),
+            _count(len(texts), "source text"),
         )
 
     def _create_baseline(self, result: PollResult) -> None:
@@ -332,9 +339,9 @@ class Monitor:
         self._state.save(Checkpoint(result.cursor, texts))
         self._state.prune(self._retention_days)
         _LOGGER.info(
-            "Baseline created from %d changes and %d source texts",
-            result.scanned,
-            len(texts),
+            "Baseline created from %s and %s",
+            _count(result.scanned, "change"),
+            _count(len(texts), "source text"),
         )
 
     def _reset_routes(
@@ -420,7 +427,11 @@ class Monitor:
                 self._state.acknowledge(route_id, _change_ids(sent))
 
             self._notifier.send(route.id, deliveries, acknowledge)
-            _LOGGER.info("Delivered %d changes to route %s", len(deliveries), route.id)
+            _LOGGER.info(
+                "Delivered %s to route %s",
+                _count(len(deliveries), "change"),
+                route.id,
+            )
 
     @staticmethod
     def _ready(
