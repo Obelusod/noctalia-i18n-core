@@ -22,10 +22,8 @@ from .models import (
     normalize_json,
 )
 
-_MAX_EMBEDS = 10
-_MAX_MESSAGE_CHARACTERS = 6000
-_MAX_ATTEMPTS = 5
-_MAX_BACKOFF_SECONDS = 20.0
+_EMBEDS_PER_MESSAGE_LIMIT = 10
+_EMBED_TEXT_PER_MESSAGE_LIMIT = 6000
 
 
 class ChangeRenderer(Protocol):
@@ -45,14 +43,19 @@ class DiscordSender(Protocol):
 def _retry_after(response: requests.Response) -> float:
     try:
         body = normalize_json(response.json(), "Discord rate limit response")
-        data = body if isinstance(body, dict) else {}
-        raw = data.get("retry_after", 1)
-        delay = float(raw) if isinstance(raw, (int, float, str)) else 1
+        if not isinstance(body, dict):
+            raise TypeError
+        delay = body.get("retry_after")
+        if (
+            isinstance(delay, bool)
+            or not isinstance(delay, (int, float))
+            or not math.isfinite(delay)
+            or delay < 0
+        ):
+            raise ValueError
     except (TypeError, ValueError):
-        delay = 1
-    if not math.isfinite(delay):
-        delay = 1
-    return min(max(delay, 0.25), _MAX_BACKOFF_SECONDS)
+        raise RuntimeError("Discord returned an invalid rate limit response") from None
+    return float(delay)
 
 
 class DiscordWebhookSender:
@@ -89,11 +92,12 @@ class DiscordWebhookSender:
             url = self._targets[target_ref]
         except KeyError:
             raise ValueError(f"Unknown Discord target: {target_ref!r}") from None
+        url = f"{url}{'&' if '?' in url else '?'}wait=true"
         body = normalize_json(dict(payload), "Discord payload")
         if not isinstance(body, dict):
             raise TypeError("Discord payload must be a JSON object")
 
-        for attempt in range(_MAX_ATTEMPTS):
+        while True:
             try:
                 response = self._session.post(
                     url,
@@ -101,25 +105,15 @@ class DiscordWebhookSender:
                     timeout=self._timeout,
                 )
             except requests.RequestException:
-                if attempt + 1 == _MAX_ATTEMPTS:
-                    raise RuntimeError(
-                        "Cannot reach Discord: network failure"
-                    ) from None
-                time.sleep(min(2**attempt, _MAX_BACKOFF_SECONDS))
-                continue
+                raise RuntimeError("Cannot reach Discord: network failure") from None
             if 200 <= response.status_code < 300:
                 return
-            retryable = response.status_code == 429 or response.status_code >= 500
-            if not retryable or attempt + 1 == _MAX_ATTEMPTS:
-                raise RuntimeError(
-                    f"Discord rejected the webhook payload: HTTP {response.status_code}"
-                )
-            delay = (
-                _retry_after(response)
-                if response.status_code == 429
-                else min(2**attempt, _MAX_BACKOFF_SECONDS)
+            if response.status_code == 429:
+                time.sleep(_retry_after(response))
+                continue
+            raise RuntimeError(
+                f"Discord rejected the webhook payload: HTTP {response.status_code}"
             )
-            time.sleep(delay)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,10 +246,11 @@ def _batches(items: Iterable[_Rendered]) -> Iterator[tuple[_Rendered, ...]]:
     characters = 0
     for item in items:
         size = embed_size(item.embed)
-        if size > _MAX_MESSAGE_CHARACTERS:
+        if size > _EMBED_TEXT_PER_MESSAGE_LIMIT:
             raise ValueError("Discord embed exceeds the 6000-character limit")
         if batch and (
-            len(batch) >= _MAX_EMBEDS or characters + size > _MAX_MESSAGE_CHARACTERS
+            len(batch) >= _EMBEDS_PER_MESSAGE_LIMIT
+            or characters + size > _EMBED_TEXT_PER_MESSAGE_LIMIT
         ):
             yield tuple(batch)
             batch = []

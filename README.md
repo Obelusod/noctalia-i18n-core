@@ -14,7 +14,7 @@ Noctalia i18n Core is an unofficial typed Python library for collecting translat
 - Wait for activity to settle while enforcing a maximum delivery delay, or flush pending work explicitly.
 - Preview rendered messages without changing state or contacting Discord.
 - Validate external YAML templates, Discord Embed limits, and JSON-shaped source and state boundaries.
-- Retry Discord rate limits and transient network or server failures without exposing webhook URLs in errors.
+- Respect Discord rate limits without exposing webhook URLs in errors.
 
 Applications provide configuration, credentials, scheduling, logging, HTTP session configuration, and message files.
 

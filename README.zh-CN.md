@@ -14,7 +14,7 @@ Noctalia i18n Core 是一个非官方、提供完整类型信息的 Python 库�
 - 等待活动趋于平静后投递并限制最长延迟，也可显式强制投递待处理内容。
 - 在不修改状态、不联系 Discord 的情况下预览最终消息。
 - 校验外部 YAML 模板、Discord Embed 限制以及数据源与状态的 JSON 边界。
-- 对 Discord 限流、暂时性网络故障和服务端故障进行重试，错误信息不会泄露 Webhook URL。
+- 遵循 Discord 限流要求，错误信息不会泄露 Webhook URL。
 
 应用负责提供配置、凭据、调度、日志、HTTP session 配置和文案文件。
 
