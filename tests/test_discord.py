@@ -189,9 +189,25 @@ class DiscordTests(unittest.TestCase):
             sender.send("route", {"content": "hello"})
 
         post.assert_called_once_with(
-            "https://discord.com/api/webhooks/id/token",
+            "https://discord.com/api/webhooks/id/token?wait=true",
             json={"content": "hello"},
             timeout=30,
+        )
+
+    def test_webhook_sender_preserves_existing_query_parameters(self) -> None:
+        session = requests.Session()
+        self.addCleanup(session.close)
+        sender = DiscordWebhookSender(
+            session,
+            {"route": "https://discord.com/api/webhooks/id/token?thread_id=1"},
+            30,
+        )
+        with patch.object(session, "post", return_value=_response(204)) as post:
+            sender.send("route", {"content": "hello"})
+
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://discord.com/api/webhooks/id/token?thread_id=1&wait=true",
         )
 
     def test_webhook_sender_retries_rate_limits(self) -> None:
@@ -216,7 +232,7 @@ class DiscordTests(unittest.TestCase):
 
         sleep.assert_called_once_with(0.25)
 
-    def test_webhook_sender_retries_network_failures(self) -> None:
+    def test_webhook_sender_reports_network_failures(self) -> None:
         session = requests.Session()
         self.addCleanup(session.close)
         sender = DiscordWebhookSender(
@@ -226,15 +242,13 @@ class DiscordTests(unittest.TestCase):
         )
         with (
             patch.object(
-                session,
-                "post",
-                side_effect=(requests.ConnectionError(), _response(204)),
-            ),
-            patch("noctalia_i18n_core.discord.time.sleep") as sleep,
+                session, "post", side_effect=requests.ConnectionError()
+            ) as post,
+            self.assertRaisesRegex(RuntimeError, "network failure"),
         ):
             sender.send("route", {"content": "hello"})
 
-        sleep.assert_called_once_with(1)
+        post.assert_called_once()
 
     def test_webhook_sender_hides_targets_from_http_errors(self) -> None:
         session = requests.Session()

@@ -108,7 +108,7 @@ class _TemplateScope:
     fallbackable: frozenset[str]
 
 
-_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _TRUNCATE_SPEC = re.compile(r"^truncate=([1-9]\d*)$")
 _FALLBACK_SPEC = re.compile(r"^fallback=([^{}]+)$")
 _DIFF_PLACEHOLDERS = frozenset({"old_diff", "new_diff"})
@@ -151,10 +151,17 @@ _EMBED_KEYS = frozenset(
         "fields",
     }
 )
-_TEXT_LIMITS = {"title": 256, "description": 4096}
-_MAX_COLOR = 0xFFFFFF
-_MAX_EMBED_CHARACTERS = 6000
-_MAX_FIELDS = 25
+_TEXT_LIMITS = {
+    "title": 256,
+    "description": 4096,
+    "field.name": 256,
+    "field.value": 1024,
+    "footer.text": 2048,
+    "author.name": 256,
+}
+_COLOR_MAX = 0xFFFFFF
+_EMBED_TEXT_LIMIT = 6000
+_FIELDS_LIMIT = 25
 _OBJECT_SCHEMAS = {
     "footer": (frozenset({"text", "icon_url"}), frozenset({"text"})),
     "image": (frozenset({"url"}), frozenset({"url"})),
@@ -430,10 +437,8 @@ def _validate_placeholder_format(
         raise ValueError(
             f"{label} contains an unsupported format specification: {format_spec!r}"
         )
-    if int(matched.group(1)) > _MAX_EMBED_CHARACTERS:
-        raise ValueError(
-            f"{label} truncate length must not exceed {_MAX_EMBED_CHARACTERS}"
-        )
+    if int(matched.group(1)) > _EMBED_TEXT_LIMIT:
+        raise ValueError(f"{label} truncate length must not exceed {_EMBED_TEXT_LIMIT}")
 
 
 def _validate_template(
@@ -492,9 +497,9 @@ def _validate_color(embed: dict[str, JsonValue], label: str) -> None:
     if (
         isinstance(color, bool)
         or not isinstance(color, int)
-        or not 0 <= color <= _MAX_COLOR
+        or not 0 <= color <= _COLOR_MAX
     ):
-        raise ValueError(f"{label}.color must be an integer from 0 to {_MAX_COLOR}")
+        raise ValueError(f"{label}.color must be an integer from 0 to {_COLOR_MAX}")
 
 
 def _validate_nested_objects(
@@ -509,16 +514,11 @@ def _validate_nested_objects(
         nested = _object(embed[key], f"{label}.{key}")
         _exact_keys(nested, allowed, required, f"{label}.{key}")
         for child, child_value in nested.items():
-            limit = None
-            if key == "footer" and child == "text":
-                limit = 2048
-            elif key == "author" and child == "name":
-                limit = 256
             _text(
                 child_value,
                 f"{label}.{key}.{child}",
                 rendered=rendered,
-                limit=limit,
+                limit=_TEXT_LIMITS.get(f"{key}.{child}"),
                 scope=scope,
             )
 
@@ -532,9 +532,9 @@ def _validate_fields(
     if "fields" not in embed:
         return
     fields = embed["fields"]
-    if not isinstance(fields, list) or not fields or len(fields) > _MAX_FIELDS:
+    if not isinstance(fields, list) or not fields or len(fields) > _FIELDS_LIMIT:
         raise ValueError(
-            f"{label}.fields must contain between 1 and {_MAX_FIELDS} fields"
+            f"{label}.fields must contain between 1 and {_FIELDS_LIMIT} fields"
         )
     for index, item in enumerate(fields):
         field_label = f"{label}.fields[{index}]"
@@ -549,14 +549,14 @@ def _validate_fields(
             field["name"],
             f"{field_label}.name",
             rendered=rendered,
-            limit=256,
+            limit=_TEXT_LIMITS["field.name"],
             scope=scope,
         )
         _text(
             field["value"],
             f"{field_label}.value",
             rendered=rendered,
-            limit=1024,
+            limit=_TEXT_LIMITS["field.value"],
             scope=scope,
         )
         if "inline" in field and not isinstance(field["inline"], bool):
@@ -590,10 +590,10 @@ def _validate_embed(
     _validate_fields(embed, label, rendered, scope)
     # The checks above establish the TypedDict structure at this YAML boundary.
     typed = cast(Embed, embed)
-    if rendered and embed_size(typed) > _MAX_EMBED_CHARACTERS:
+    if rendered and embed_size(typed) > _EMBED_TEXT_LIMIT:
         raise ValueError(
             f"{label} must not exceed Discord's "
-            f"{_MAX_EMBED_CHARACTERS}-character aggregate limit"
+            f"{_EMBED_TEXT_LIMIT}-character aggregate limit"
         )
     return typed
 
@@ -624,7 +624,7 @@ def _render_values(
             raise ValueError(f"{label}.key must be a non-empty string")
         if change_url is not None and not isinstance(change_url, str):
             raise ValueError(f"{label}.change_url must be a string or null")
-        scope["key_link"] = f"[{key}]({change_url})" if change_url else f"`{key}`"
+        scope["key_link"] = f"[`{key}`]({change_url})" if change_url else f"`{key}`"
     if diff_styles is not None:
         old_style, new_style = diff_styles
         old_diff, new_diff = format_ansi_diff(

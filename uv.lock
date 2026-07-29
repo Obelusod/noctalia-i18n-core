@@ -95,7 +95,7 @@ wheels = [
 
 [[package]]
 name = "noctalia-i18n-core"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
@@ -110,8 +110,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "requests", specifier = ">=2.32,<3" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "requests", specifier = ">=2.32" },
 ]
 
 [package.metadata.requires-dev]
