@@ -1,0 +1,70 @@
+[project]
+name = "noctalia-i18n-core"
+version = "0.1.0"
+description = "Reusable monitoring, persistence, rendering, and delivery core for Noctalia Translate"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Obelus" }]
+keywords = ["discord", "i18n", "localization", "monitoring", "noctalia"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Internationalization",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = [
+  "PyYAML>=6,<7",
+  "requests>=2.32,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/Obelusod/noctalia-i18n-core"
+Issues = "https://github.com/Obelusod/noctalia-i18n-core/issues"
+Source = "https://github.com/Obelusod/noctalia-i18n-core"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+  "basedpyright==1.39.9",
+  "ruff==0.15.22",
+]
+
+[tool.basedpyright]
+include = ["noctalia_i18n_core", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+reportImplicitOverride = "error"
+reportUnreachable = "error"
+venv = ".venv"
+venvPath = "."
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["noctalia_i18n_core"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "LICENSE",
+  "README.md",
+  "README.zh-CN.md",
+  "noctalia_i18n_core",
+  "pyproject.toml",
+  "tests",
+]
