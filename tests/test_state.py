@@ -29,7 +29,7 @@ class StateTests(unittest.TestCase):
                         delivered_at TEXT NOT NULL,
                         PRIMARY KEY(route_id, change_id)
                     );
-                    CREATE TABLE baseline_notifications (
+                    CREATE TABLE baseline_receipts (
                         route_id TEXT PRIMARY KEY,
                         delivered_at TEXT NOT NULL
                     );
@@ -84,7 +84,7 @@ class StateTests(unittest.TestCase):
                     RUN_AT,
                 )
                 self.assertEqual(state.load(), checkpoint)
-                state.acknowledge("primary", ("change-id", "change-id"))
+                state.acknowledge("primary", (primary, primary))
                 state.collect(
                     checkpoint,
                     {"primary": (primary,), "secondary": ()},
@@ -93,15 +93,15 @@ class StateTests(unittest.TestCase):
                 state.discard("secondary", ("change-id",))
                 self.assertEqual(state.pending("primary"), ())
                 self.assertEqual(state.pending("secondary"), ())
-                self.assertFalse(state.baseline_notified("primary"))
-                state.record_baseline("primary")
-                state.record_baseline("primary")
-                self.assertTrue(state.baseline_notified("primary"))
+                self.assertFalse(state.baseline_acknowledged("primary"))
+                state.acknowledge_baseline("primary")
+                state.acknowledge_baseline("primary")
+                self.assertTrue(state.baseline_acknowledged("primary"))
                 summary = state.summary()
                 self.assertTrue(summary.initialized)
                 self.assertEqual(summary.source_texts, 1)
                 self.assertEqual(summary.delivery_receipts, 1)
-                self.assertEqual(summary.baseline_notifications, 1)
+                self.assertEqual(summary.baseline_receipts, 1)
                 self.assertEqual(summary.pending_deliveries, 0)
                 self.assertEqual(summary.pending_routes, 0)
                 self.assertIsNotNone(summary.updated_at)
@@ -160,11 +160,11 @@ class StateTests(unittest.TestCase):
             try:
                 item = delivery(id="queued-change")
                 checkpoint = Checkpoint("first", {})
-                state.record_baseline("old")
+                state.acknowledge_baseline("old")
                 state.collect(checkpoint, {"old": (item,), "current": ()}, RUN_AT)
                 state.collect(Checkpoint("second", {}), {"current": ()}, RUN_AT)
                 self.assertEqual(state.pending("old"), ())
-                self.assertFalse(state.baseline_notified("old"))
+                self.assertFalse(state.baseline_acknowledged("old"))
             finally:
                 state.close()
 
@@ -179,23 +179,23 @@ class StateTests(unittest.TestCase):
                     {"old": (delivered, pending)},
                     RUN_AT,
                 )
-                state.acknowledge("old", ("delivered",))
-                state.record_baseline("old")
+                state.acknowledge("old", (delivered,))
+                state.acknowledge_baseline("old")
 
                 baseline = Checkpoint("baseline", {"key": "Source"})
                 state.reset("baseline", baseline, ("current",))
                 self.assertEqual(state.load(), baseline)
                 self.assertEqual(len(state.pending("old")), 1)
-                self.assertTrue(state.baseline_notified("old"))
-                self.assertTrue(state.baseline_notified("current"))
+                self.assertTrue(state.baseline_acknowledged("old"))
+                self.assertTrue(state.baseline_acknowledged("current"))
                 self.assertEqual(state.summary().delivery_receipts, 1)
 
                 cleared = Checkpoint("full", {"key": "Updated source"})
                 state.reset("full", cleared, ("current",))
                 self.assertEqual(state.load(), cleared)
                 self.assertEqual(state.pending("old"), ())
-                self.assertFalse(state.baseline_notified("old"))
-                self.assertTrue(state.baseline_notified("current"))
+                self.assertFalse(state.baseline_acknowledged("old"))
+                self.assertTrue(state.baseline_acknowledged("current"))
                 self.assertEqual(state.summary().delivery_receipts, 0)
             finally:
                 state.close()
