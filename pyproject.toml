@@ -1,13 +1,13 @@
 [project]
 name = "noctalia-i18n-core"
-version = "0.1.1"
-description = "Reusable monitoring, persistence, rendering, and delivery core for Noctalia Translate"
+version = "0.2.0"
+description = "Collection, routing, and persistence for Noctalia Translate changes"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Obelus" }]
-keywords = ["discord", "i18n", "localization", "monitoring", "noctalia"]
+keywords = ["i18n", "localization", "monitoring", "noctalia"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -21,7 +21,6 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "PyYAML>=6",
   "requests>=2.32",
 ]
 
