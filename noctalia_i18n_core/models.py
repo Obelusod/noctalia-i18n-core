@@ -1,4 +1,4 @@
-"""Domain values shared by sources, monitoring, state, and rendering."""
+"""Domain values shared by sources, monitoring, and state."""
 
 from __future__ import annotations
 
@@ -176,12 +176,11 @@ class Checkpoint:
 
 @dataclass(frozen=True, slots=True)
 class DeliveryPolicy:
-    """Accumulation, folding, and optional locale-merge behavior."""
+    """Accumulation and folding behavior for one route."""
 
     quiet_seconds: int
     max_wait_seconds: int
     fold_changes: bool
-    merge_threshold: int | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -196,15 +195,11 @@ class DeliveryPolicy:
             )
         if type(self.fold_changes) is not bool:
             raise ValueError("Delivery fold_changes must be a boolean")
-        if self.merge_threshold is not None and (
-            type(self.merge_threshold) is not int or self.merge_threshold < 0
-        ):
-            raise ValueError("Delivery merge_threshold must be None or non-negative")
 
 
 @dataclass(frozen=True, slots=True)
 class Delivery:
-    """A change enriched with the English text needed for rendering."""
+    """A change enriched with its corresponding English source text."""
 
     change: Change
     source_text: str | None

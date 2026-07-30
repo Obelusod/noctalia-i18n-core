@@ -8,12 +8,12 @@ import noctalia_i18n_core
 
 def main() -> None:
     required = {
-        "DiscordWebhookSender",
+        "Delivery",
         "Monitor",
         "NoctaliaSource",
+        "MonitorResult",
+        "Route",
         "SQLiteState",
-        "load_merge",
-        "load_message",
     }
     missing = required.difference(noctalia_i18n_core.__all__)
     if missing:

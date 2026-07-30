@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS delivery_receipts (
 );
 CREATE INDEX IF NOT EXISTS delivery_receipts_delivered_at
     ON delivery_receipts(delivered_at);
-CREATE TABLE IF NOT EXISTS baseline_notifications (
+CREATE TABLE IF NOT EXISTS baseline_receipts (
     route_id TEXT PRIMARY KEY,
     delivered_at TEXT NOT NULL
 );
@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS outbox_route_queued_at
     ON outbox(route_id, queued_at);
 """
 _SCHEMA_COLUMNS = {
-    "baseline_notifications": ("route_id", "delivered_at"),
+    "baseline_receipts": ("route_id", "delivered_at"),
     "delivery_receipts": ("route_id", "change_id", "delivered_at"),
     "meta": ("key", "value"),
     "outbox": ("route_id", "change_id", "delivery", "queued_at"),
@@ -65,7 +65,7 @@ class StateSummary:
     updated_at: datetime | None
     source_texts: int
     delivery_receipts: int
-    baseline_notifications: int
+    baseline_receipts: int
     pending_deliveries: int
     pending_routes: int
 
@@ -230,7 +230,7 @@ class SQLiteState:
         self,
         mode: ResetMode,
         checkpoint: Checkpoint,
-        notified_routes: Sequence[str],
+        acknowledged_routes: Sequence[str],
     ) -> None:
         """Apply one reset mode and establish the supplied baseline."""
 
@@ -239,16 +239,16 @@ class SQLiteState:
                 for table in (
                     "meta",
                     "delivery_receipts",
-                    "baseline_notifications",
+                    "baseline_receipts",
                     "outbox",
                 ):
                     self._db.execute(f"DELETE FROM {table}")
             now = _now()
             self._write_checkpoint(checkpoint, now)
             self._db.executemany(
-                "INSERT OR IGNORE INTO baseline_notifications(route_id, delivered_at) "
+                "INSERT OR IGNORE INTO baseline_receipts(route_id, delivered_at) "
                 "VALUES(?, ?)",
-                ((route_id, now.isoformat()) for route_id in notified_routes),
+                ((route_id, now.isoformat()) for route_id in acknowledged_routes),
             )
 
     def collect(
@@ -272,13 +272,13 @@ class SQLiteState:
                     route_ids,
                 )
                 self._db.execute(
-                    f"DELETE FROM baseline_notifications "
+                    f"DELETE FROM baseline_receipts "
                     f"WHERE route_id NOT IN ({placeholders})",
                     route_ids,
                 )
             else:
                 self._db.execute("DELETE FROM outbox")
-                self._db.execute("DELETE FROM baseline_notifications")
+                self._db.execute("DELETE FROM baseline_receipts")
             for route_id, items in deliveries.items():
                 for delivery in items:
                     if delivery.change_ids != (delivery.change.id,):
@@ -329,9 +329,18 @@ class SQLiteState:
             for change_id, delivery, queued_at in rows
         )
 
-    def acknowledge(self, route_id: str, change_ids: Sequence[str]) -> None:
-        if not change_ids:
+    def acknowledge(
+        self,
+        route_id: str,
+        deliveries: Sequence[Delivery],
+    ) -> None:
+        """Record deliveries completed by an external transport."""
+
+        if not deliveries:
             return
+        change_ids = tuple(
+            change_id for delivery in deliveries for change_id in delivery.change_ids
+        )
         with self._transaction():
             delivered_at = _now().isoformat()
             self._db.executemany(
@@ -350,20 +359,22 @@ class SQLiteState:
         with self._transaction():
             self._delete_pending(route_id, change_ids)
 
-    def baseline_notified(self, route_id: str) -> bool:
+    def baseline_acknowledged(self, route_id: str) -> bool:
         with _database_errors():
             return (
                 self._db.execute(
-                    "SELECT 1 FROM baseline_notifications WHERE route_id = ?",
+                    "SELECT 1 FROM baseline_receipts WHERE route_id = ?",
                     (route_id,),
                 ).fetchone()
                 is not None
             )
 
-    def record_baseline(self, route_id: str) -> None:
+    def acknowledge_baseline(self, route_id: str) -> None:
+        """Record a baseline notice completed by an external transport."""
+
         with self._transaction():
             self._db.execute(
-                "INSERT OR IGNORE INTO baseline_notifications(route_id, delivered_at) "
+                "INSERT OR IGNORE INTO baseline_receipts(route_id, delivered_at) "
                 "VALUES(?, ?)",
                 (route_id, _now().isoformat()),
             )
@@ -387,7 +398,7 @@ class SQLiteState:
                 "SELECT COUNT(*) FROM delivery_receipts"
             ).fetchone()
             routes = self._db.execute(
-                "SELECT COUNT(*) FROM baseline_notifications"
+                "SELECT COUNT(*) FROM baseline_receipts"
             ).fetchone()
             pending = self._db.execute("SELECT COUNT(*) FROM outbox").fetchone()
             pending_routes = self._db.execute(
@@ -404,7 +415,7 @@ class SQLiteState:
                     0 if checkpoint is None else len(checkpoint.source_texts)
                 ),
                 delivery_receipts=int(receipts[0]),
-                baseline_notifications=int(routes[0]),
+                baseline_receipts=int(routes[0]),
                 pending_deliveries=int(pending[0]),
                 pending_routes=int(pending_routes[0]),
             )
