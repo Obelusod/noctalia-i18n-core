@@ -2,274 +2,206 @@
 
 [简体中文](https://github.com/Obelusod/noctalia-i18n-core/blob/main/README.zh-CN.md)
 
-Noctalia i18n Core is an unofficial typed Python library for collecting translation changes from [Noctalia Translate](https://i18n.noctalia.dev/projects), persisting delivery state, rendering caller-owned Discord messages, and delivering them reliably. It requires Python 3.12 or newer.
+Noctalia i18n Core collects normalized translation changes from [Noctalia Translate](https://i18n.noctalia.dev/projects) and persists source checkpoints, source-text snapshots, pending deliveries, and delivery receipts in SQLite. Applications filter changes through routes, send mature batches through any synchronous or asynchronous transport, and acknowledge successful requests.
 
 ## Features
 
 - Collect normalized additions, modifications, and deletions with project-bound opaque cursors.
 - Recover every available change since the stored cursor without an arbitrary page limit.
-- Share one source poll across independent routes with their own locales, actions, messages, and delivery policies.
-- Persist source snapshots, route outboxes, delivery receipts, and baseline-notification state in SQLite.
-- Fold repeated changes into their net result and merge large locale batches at caller-selected thresholds.
-- Wait for activity to settle while enforcing a maximum delivery delay, or flush pending work explicitly.
-- Preview rendered messages without changing state or contacting Discord.
-- Validate external YAML templates, Discord Embed limits, and JSON-shaped source and state boundaries.
-- Respect Discord rate limits without exposing webhook URLs in errors.
+- Share one source poll across independent routes with their own locale, action, and delivery policies.
+- Persist source snapshots, route outboxes, delivery receipts, and baseline receipts in SQLite.
+- Fold repeated changes into their net result and delay delivery until activity settles or a maximum wait expires.
+- Preview the deliveries produced by a normal cycle or forced flush without changing state.
+- Validate source and state boundaries while keeping cursor representations private to their adapters.
 
-Applications provide configuration, credentials, scheduling, logging, HTTP session configuration, and message files.
+Applications provide configuration, credentials, scheduling, logging, HTTP session configuration, routes, rendering, and transport.
 
 ## Project structure
 
 ```text
 noctalia_i18n_core/
-├── sources/            # Translation change source adapters
-│   └── noctalia.py     # Noctalia Translate source adapter
-├── diff.py             # Multilingual ANSI diff rendering
-├── discord.py          # Discord routing, rendering, and delivery
-├── messages.py         # YAML message loading and rendering
-├── models.py           # Shared monitoring domain values
-├── monitor.py          # Monitoring workflow and delivery policy
+├── sources/            # Translation source contracts and adapters
+│   └── noctalia.py     # Noctalia Translate adapter
+├── models.py           # Shared domain values
+├── monitor.py          # Collection, routing, folding, and batch policy
 └── state.py            # SQLite checkpoints and delivery state
 ```
 
 ## Installation
 
-Install the package from PyPI:
-
-```bash
-pip install noctalia-i18n-core
-```
-
-With uv:
+Install from PyPI with uv:
 
 ```bash
 uv add noctalia-i18n-core
 ```
 
-## Quick start
+Or with pip:
 
-The package does not include message files. This example loads caller-owned templates and runs one Discord route:
+```bash
+pip install noctalia-i18n-core
+```
+
+## Usage
+
+The following example monitors Simplified Chinese changes, prints mature batches to the terminal, and acknowledges the corresponding records after successful output:
 
 ```python
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
-import requests
-
 from noctalia_i18n_core import (
+    Change,
     DeliveryPolicy,
-    DiscordNotifier,
-    DiscordRoute,
-    DiscordWebhookSender,
     Monitor,
     NoctaliaSource,
     SQLiteState,
-    load_merge,
-    load_message,
 )
 
-message_root = Path("/etc/my-app/messages")
-source_message = load_message("english", message_root / "source")
-target_message = load_message("english", message_root / "target")
-merge_message = load_merge("english", message_root / "merge")
 
-route = DiscordRoute(
-    id="default",
-    target_ref="default",
-    monitor_id="noctalia",
-    project="noctalia",
-    locales=frozenset({"en", "zh-Hans"}),
-    actions=frozenset({"added", "modified", "deleted"}),
-    delivery=DeliveryPolicy(
-        quiet_seconds=240,
-        max_wait_seconds=900,
+@dataclass(frozen=True, slots=True)
+class ChineseRoute:
+    id: str = "zh-Hans"
+    delivery: DeliveryPolicy = DeliveryPolicy(
+        quiet_seconds=60,
+        max_wait_seconds=600,
         fold_changes=True,
-        merge_threshold=5,
-    ),
-    source_renderer=source_message,
-    target_renderer=target_message,
-    merge_renderer=merge_message,
-)
+    )
+    notify_baseline: bool = False
+
+    def accepts_locale(self, locale: str) -> bool:
+        return locale == "zh-Hans"
+
+    def matches(self, change: Change) -> bool:
+        return self.accepts_locale(change.locale)
+
 
 with (
-    requests.Session() as session,
+    closing(NoctaliaSource("noctalia", timeout=30)) as source,
     closing(SQLiteState(Path("state.sqlite3"))) as state,
 ):
-    source = NoctaliaSource("noctalia", timeout=30, session=session)
-    sender = DiscordWebhookSender(
-        session,
-        {"default": "https://discord.com/api/webhooks/..."},
-        timeout=30,
-    )
     monitor = Monitor(
         source,
         state,
-        DiscordNotifier((route,), sender),
+        (ChineseRoute(),),
         retention_days=180,
     )
-    monitor.run()
+    result = monitor.run()
+
+    for route_id in result.baseline_routes:
+        print(route_id, result.scanned, result.source_texts)
+        state.acknowledge_baseline(route_id)
+
+    for route_id, deliveries in result.deliveries.items():
+        for delivery in deliveries:
+            change = delivery.change
+            print(route_id, change.action, change.key, change.new_value)
+        state.acknowledge(route_id, deliveries)
 ```
 
-The first run establishes a baseline without replaying existing history. Later runs atomically advance the cursor and enqueue matching changes before delivery. Each successful Discord request acknowledges only the records it contains, so a later failure leaves the remaining outbox intact.
+The first run establishes the current position as a baseline without replaying existing history. The application then schedules the same workflow repeatedly: the monitor persists the new cursor and matching changes before returning batches whose waiting policy has matured. The example handles a complete batch at once. A real transport should acknowledge only the `Delivery` values contained in each successful external request.
 
-## Monitoring lifecycle
-
-```python
-monitor.run()                 # Collect and deliver mature batches
-monitor.run(flush=True)       # Also deliver pending immature batches
-preview = monitor.preview()   # Collect and render without writes or sends
-monitor.reset("baseline")     # Replace the source baseline; preserve delivery state
-monitor.reset("full")         # Clear all monitoring state; establish a new baseline
-```
-
-`run()` persists newly observed changes before attempting delivery. Pending records therefore survive restarts and transport failures. Delivery receipts prevent a successful request from being repeated.
-
-`preview()` reads the selected source but does not write SQLite state, invoke the sender, or establish a missing baseline. `reset()` suppresses a new baseline notification unless `notify=True` is passed.
-
-`SQLiteState.summary()` returns initialization status, update time, source-snapshot size, receipt and baseline-notification counts, and pending delivery and route counts.
+`Monitor` does not schedule itself, render messages, or perform transport calls. A synchronous application can handle results directly. An asynchronous application can briefly open the source and state in a worker thread, run the monitor, send its result in the event loop, and reopen the state in a worker to acknowledge success. Do not use the same `NoctaliaSource` or `SQLiteState` instance across threads, and serialize collection and reset cycles that share a state file.
 
 ## Sources
 
 `NoctaliaSource(project, timeout, session=None)` reads structured Recent Changes data and the English export from Noctalia Translate. Project identifiers use lowercase letters, digits, and single hyphens, matching identifiers such as `noctalia`, `official-plugins`, and `community-plugins`.
 
 - `poll(None)` returns the newest cursor and a complete English source snapshot without replaying history.
-- `poll(cursor)` returns unique changes ordered oldest first and follows all reported history pages until it finds the previous event.
+- `poll(cursor)` returns every available newer change and follows reported history pages until it finds the previous event.
 - A cursor from another source or project fails explicitly instead of silently creating a new baseline.
 - `history(page)` returns one upstream page in its native newest-first order.
 - `close()` closes only a session created by the source; a supplied session remains caller-owned.
 
 Source cursors are JSON values but intentionally opaque. Callers must persist and return them unchanged.
 
-Custom sources implement `Source` and return `PollResult`, both imported from `noctalia_i18n_core`. An initial poll must include the complete source-language mapping. A later poll may omit it when its normalized English changes are sufficient to advance the stored snapshot.
+Custom sources implement `Source` and return `PollResult`. An initial poll must include the complete source-language mapping. A later poll may omit it when its normalized English changes are sufficient to advance the stored snapshot.
+
+Call the source directly when durable monitoring is not required:
+
+```python
+from contextlib import closing
+
+from noctalia_i18n_core import NoctaliaSource
+
+with closing(NoctaliaSource("noctalia", timeout=30)) as source:
+    baseline = source.poll(None)
+    result = source.poll(baseline.cursor)
+
+for change in result.changes:
+    print(change.locale, change.action, change.key)
+```
+
+A real application should persist the cursor and return it unchanged in the next run. Subsequent results contain unique changes ordered oldest first.
+
+## Monitoring
+
+`Monitor` combines a `Source`, state store, and sequence of routes:
+
+```python
+result = monitor.run()                    # Collect and return mature batches
+result = monitor.run(flush=True)          # Also return immature batches
+preview = monitor.preview()               # Preview the cycle without writes
+preview = monitor.preview(flush=True)     # Preview a forced flush
+result = monitor.reset("baseline")        # Replace the baseline; keep delivery state
+result = monitor.reset("full")            # Clear delivery state; set a new baseline
+```
+
+`run()` atomically advances the source checkpoint and enqueues matching changes before returning mature batches through `MonitorResult.deliveries`. Pending records survive restarts and transport failures. After a successful request, the application calls `acknowledge(route_id, deliveries)` on the state store so delivery receipts prevent the same changes from being enqueued again for that route.
+
+`preview()` combines stored pending records with newly observed changes and applies the same waiting, filtering, and folding policy as `run()` without modifying state. Pass `flush=True` to preview a forced flush.
+
+`MonitorResult.baseline_routes` lists routes whose baseline notices remain unacknowledged. After sending one successfully, the application calls `acknowledge_baseline(route_id)` on the state store; unacknowledged routes reappear in later cycles. `reset()` treats the new baseline as not requiring a notice by default and returns its routes only when `notify=True` is passed. The `baseline` mode preserves outbox and receipt state; `full` clears all monitoring state before establishing the new baseline.
 
 ## Routes and delivery
 
-`DiscordRoute` binds a change subscription, renderers, delivery policy, and opaque `target_ref`. `DiscordWebhookSender` resolves the reference through a caller-supplied target mapping, keeping credentials out of persisted state and previews.
+`Route` is a structural contract with the following members:
 
-| Field | Purpose |
+| Member | Purpose |
 | --- | --- |
-| `id` | Stable route identifier, unique within one notifier |
-| `target_ref` | Opaque key resolved by the sender |
-| `monitor_id` | Caller-defined monitor identifier exposed to templates |
-| `project` | Caller-defined project identifier exposed to templates |
-| `locales` | Exact locale set, or `frozenset({"*"})` for every locale |
-| `actions` | Non-empty subset of `added`, `modified`, and `deleted` |
-| `delivery` | Route-local accumulation and merge policy |
-| `source_renderer` | Renderer for English source changes |
-| `target_renderer` | Renderer for target-locale changes |
-| `merge_renderer` | Optional renderer for merged locale batches |
-| `baseline_renderer` | Optional renderer enabling baseline notifications |
-| `username` | Optional per-send Discord username override |
-| `avatar_url` | Optional per-send Discord avatar override |
+| `id` | Stable route identifier |
+| `delivery` | Route-local `DeliveryPolicy` |
+| `notify_baseline` | Whether the route receives a baseline notification |
+| `accepts_locale(locale)` | Whether the route subscribes to a locale |
+| `matches(change)` | Whether the route accepts a normalized change |
 
-The locale wildcard must be used alone. A route accepting English requires `source_renderer`; a route accepting any target locale requires `target_renderer`. `merge_renderer` is required exactly when merging is enabled. When supplied, `baseline_renderer` receives the recent-change count and source-text count.
+Route IDs must be non-empty and unique within a monitoring cycle. A route ID identifies a durable subscription rather than a transport address. Use a stable value without credentials, not a mutable display name or Webhook URL.
 
-`DeliveryPolicy` controls when and how each route processes its outbox:
+`Monitor` snapshots its routes at construction. After persisted subscriptions change, create a new monitor from the current routes. The next `run()` removes outbox records and baseline receipts for routes no longer present.
+
+`DeliveryPolicy` controls outbox preparation:
 
 | Field | Purpose |
 | --- | --- |
 | `quiet_seconds` | Required inactivity before automatic delivery |
 | `max_wait_seconds` | Maximum age of the oldest pending record |
 | `fold_changes` | Whether to fold each locale and key into its net change |
-| `merge_threshold` | Merge a locale batch when its size exceeds this value; `None` disables merging |
 
-A `merge_threshold` of `0` merges every non-empty batch. For a custom transport, implement `DiscordSender`; its `send(target_ref, payload)` method receives a complete JSON-compatible Discord payload.
+`max_wait_seconds` must not be less than `quiet_seconds`. A value of zero makes the corresponding delivery condition immediate.
 
-## Message templates
+Core defines no transport protocol and has no event-loop dependency. An application may split a route batch across multiple external requests and call `acknowledge()` after each success with exactly the `Delivery` values included in that request. If a later request fails, the state store retains every unacknowledged record. A process exit after a successful send but before its acknowledgement may repeat that request on the next run. These at-least-once semantics let Webhooks, bot channels, threads, message queues, and other transports share the same collection and delivery state.
 
-The package never bundles or selects message files. `load_message(name, directory)` and `load_merge(name, directory)` resolve `<directory>/<name>.yaml`. They reject unsafe names, duplicate YAML keys, missing or unknown fields, invalid placeholders, and content exceeding Discord Embed limits.
+## State
 
-A detailed message file requires `added`, `modified`, and `deleted` embeds and may define `diff`:
+`SQLiteState(path, read_only=False)` persists:
 
-````yaml
-diff:
-  old: {color: red, bold: true, underline: false}
-  new: {color: green, bold: true, underline: false}
-added:
-  title: "[{locale}] Added"
-  description: |-
-    {key_link}
-    `{new_value:truncate=1000}`
-modified:
-  title: "[{locale}] Modified"
-  url: "{change_url}"
-  description: |-
-    ```ansi
-    − {old_diff}
-    + {new_diff}
-    ```
-deleted:
-  title: "[{locale}] Deleted"
-  description: "{key_link}"
-````
+- the opaque source cursor;
+- the matching complete English snapshot;
+- pending deliveries by route;
+- delivery receipts;
+- baseline receipts.
 
-A merge file requires `source`, `target`, and `entries`. `entries` requires `separator`, `added`, `modified`, and `deleted`; an optional `diff` uses the same schema as a detailed message. Oversized merges split only at entry boundaries.
+State updates use SQLite transactions. An incompatible schema is rejected without modification. Read-only state opens an existing database without writes and uses an in-memory empty state when the file does not exist.
 
-Embed templates support `title`, `description`, `url`, `timestamp`, `color`, `footer`, `image`, `thumbnail`, `author`, and `fields`. A detailed embed may set `url: "{change_url}"` to link its title to the individual change. Merged embeds do not expose `change_url` because one batch may contain multiple changes.
-
-Detailed embeds and merge entries support these placeholders:
-
-| Placeholder | Value |
-| --- | --- |
-| `{monitor_id}` | Caller-defined monitor identifier |
-| `{project}` | Caller-defined project identifier |
-| `{key}` | Translation key |
-| `{key_link}` | Key linked to the change URL, or code-styled when the URL is unavailable |
-| `{source}` | Current English source text |
-| `{old_value}` | Value before a modification or deletion |
-| `{new_value}` | Value after an addition or modification |
-| `{old_diff}` | Previous value with changed tokens using the configured ANSI style |
-| `{new_diff}` | New value with changed tokens using the configured ANSI style |
-| `{locale}` | Normalized locale identifier |
-| `{actor}` | Editor name |
-| `{actor_url}` | Editor profile URL, when available |
-| `{actor_avatar_url}` | Editor avatar URL, when available |
-| `{action}` | `added`, `modified`, or `deleted` |
-| `{change_url}` | Translation editor URL, when available |
-| `{timestamp}` | UTC ISO 8601 change time |
-| `{unix_time}` | Unix seconds for Discord timestamp markup |
-
-Merged embeds support these batch placeholders:
-
-| Placeholder | Value |
-| --- | --- |
-| `{monitor_id}` | Caller-defined monitor identifier |
-| `{project}` | Caller-defined project identifier |
-| `{locale}` | Locale shared by the batch |
-| `{count}` | Number of changes in the current message |
-| `{actors}` | Unique editor names |
-| `{actor_count}` | Number of unique editors |
-| `{actor_avatar_url}` | Editor avatar URL when the batch has one editor and an avatar is available |
-| `{added_count}` | Number of additions |
-| `{modified_count}` | Number of modifications |
-| `{deleted_count}` | Number of deletions |
-| `{first_timestamp}` | UTC ISO 8601 time of the first change |
-| `{last_timestamp}` | UTC ISO 8601 time of the last change |
-| `{first_unix_time}` | Unix seconds for the first change |
-| `{last_unix_time}` | Unix seconds for the last change |
-| `{entries}` | Rendered entries joined by `entries.separator` |
-
-Use `truncate=N` to limit `{key}`, `{source}`, `{old_value}`, `{new_value}`, and `{actor}`. Merged embeds also allow it on `{actors}` and `{entries}`. `N` includes the ellipsis, and wide characters count as two columns:
-
-```yaml
-value: "{source:truncate=1024}"
-```
-
-Use `fallback=...` to replace an unavailable string value:
-
-```yaml
-icon_url: "{actor_avatar_url:fallback=https://github.com/noctalia-dev.png}"
-```
-
-`diff` is required only when `{old_diff}` or `{new_diff}` is used. Supported ANSI colors are `gray`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and `null`; `bold` and `underline` control emphasis independently.
+`SQLiteState.summary()` returns initialization status, update time, source-snapshot size, delivery and baseline receipt counts, and pending delivery and route counts. Delivery receipts older than the monitor's configured retention period are pruned after successful cycles.
 
 ## API contracts
 
-Supported caller-facing names are exported directly from `noctalia_i18n_core`; submodules organize implementation and are not required for normal imports. `JsonValue` describes opaque JSON-shaped cursors and preview data. JSON validation and normalization remain internal.
+Supported caller-facing names are exported directly from `noctalia_i18n_core`; submodules organize implementation and are not required for normal imports.
 
-Invalid constructor arguments and templates raise `ValueError`. Source, SQLite, rendering, and transport failures raise `RuntimeError`. The package does not define a custom exception hierarchy.
+`JsonValue` describes opaque JSON-shaped cursors. JSON validation and normalization remain internal. Invalid constructor arguments raise `ValueError`; source and SQLite failures raise `RuntimeError`. The package does not define a custom exception hierarchy.
 
-`SQLiteState` owns its database connection until `close()` is called. `NoctaliaSource` closes only a session it creates; `DiscordWebhookSender` never closes or reconfigures its supplied session.
+`SQLiteState` owns its database connection until `close()` is called. `NoctaliaSource` closes only a session it creates.
 
 ## Development
 
