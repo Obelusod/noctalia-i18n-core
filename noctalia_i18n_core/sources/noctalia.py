@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from ..models import (
     normalize_json,
 )
 
+_LOGGER = logging.getLogger(__name__)
 _BASE_URL = "https://i18n.noctalia.dev"
 _CURSOR_TYPE = "noctalia-web"
 _PROJECT_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -90,10 +92,10 @@ def _timestamp(value: JsonValue) -> datetime:
 def _change_values(
     old_value: str | None,
     new_value: str | None,
-) -> tuple[Action, str | None, str | None]:
+) -> tuple[Action, str | None, str | None] | None:
     if old_value in {None, ""}:
         if not new_value:
-            raise RuntimeError("Recent Changes contains an empty change")
+            return None
         return "added", None, new_value
     if new_value in {None, ""}:
         return "deleted", old_value, None
@@ -197,7 +199,15 @@ def _parse_page(payload: JsonValue, project: str) -> _Page:
             _field(values, record, "new_text", label),
             f"{label} new value",
         )
-        action, old_value, new_value = _change_values(old_value, new_value)
+        change_values = _change_values(old_value, new_value)
+        if change_values is None:
+            _LOGGER.warning(
+                "Skipping empty Recent Changes record %s on page %s",
+                change_id,
+                number,
+            )
+            continue
+        action, old_value, new_value = change_values
         actor_url, actor_avatar_url = _github_urls(actor_login)
         url = (
             f"{_BASE_URL}/projects/{project}/translate?"
