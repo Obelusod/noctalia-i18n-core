@@ -219,6 +219,43 @@ class NoctaliaSourceTests(unittest.TestCase):
             ("deleted", "Former", None),
         )
 
+    def test_page_skips_an_empty_change_without_dropping_the_page(self) -> None:
+        modified: _Record = (
+            "fixture.modified",
+            "de",
+            "fixture-editor",
+            1784300002000,
+            "Former",
+            "Updated",
+        )
+        empty: _Record = (
+            "fixture.empty",
+            "pt-BR",
+            "fixture-editor",
+            1784300001000,
+            "",
+            "",
+        )
+        added: _Record = (
+            "fixture.added",
+            "de",
+            "fixture-editor",
+            1784300000000,
+            "",
+            "Added",
+        )
+        source, _ = _source(_response(_page(modified, empty, added)))
+
+        changes = source.history(1)
+
+        self.assertEqual(
+            [(change.id, change.action) for change in changes],
+            [
+                (_change_id(modified), "modified"),
+                (_change_id(added), "added"),
+            ],
+        )
+
     def test_page_returns_an_empty_out_of_range_page(self) -> None:
         source, _ = _source(_response(_page(page=2, total_pages=1)))
 
@@ -340,6 +377,32 @@ class NoctaliaSourceTests(unittest.TestCase):
             },
         )
         self.assertIsNone(result.source_texts)
+
+    def test_poll_skips_an_empty_change_while_recovering(self) -> None:
+        baseline = _records("fixture.baseline", 3)
+        ahead = _records("fixture.ahead", 2, start=1784300100000)
+        empty: _Record = (
+            "fixture.empty",
+            "pt-BR",
+            "fixture-editor",
+            1784300005000,
+            "",
+            "",
+        )
+        source_payload = {"en": {"fixture": {"source": "Source"}}}
+        source, _ = _source(
+            *_baseline_responses(source_payload, baseline),
+            _response(_page(*ahead, empty, *baseline, total_pages=2)),
+            _response(_page(*baseline, page=2, total_pages=2)),
+        )
+
+        checkpoint = source.poll(None)
+        result = source.poll(checkpoint.cursor)
+
+        self.assertEqual(
+            result.changes,
+            tuple(_expected_change(record) for record in reversed(ahead)),
+        )
 
     def test_empty_history_collects_the_first_changes(self) -> None:
         added = _records(
