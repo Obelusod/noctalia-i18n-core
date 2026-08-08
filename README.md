@@ -2,34 +2,27 @@
 
 [简体中文](https://github.com/Obelusod/noctalia-i18n-core/blob/main/README.zh-CN.md)
 
-Noctalia i18n Core collects normalized translation changes from [Noctalia Translate](https://i18n.noctalia.dev/projects) and persists source checkpoints, source-text snapshots, pending deliveries, and delivery receipts in SQLite. Applications filter changes through routes, send mature batches through any synchronous or asynchronous transport, and acknowledge successful requests.
+Noctalia i18n Core is a read-only Python client for project progress, current translations, and changes from [Noctalia Translate](https://i18n.noctalia.dev/). Storage, scheduling, delivery, and application policy belong to the caller.
 
-## Features
+## Core capabilities
 
-- Collect normalized additions, modifications, and deletions with project-bound opaque cursors.
-- Recover every available change since the stored cursor without an arbitrary page limit.
-- Share one source poll across independent routes with their own locale, action, and delivery policies.
-- Persist source snapshots, route outboxes, delivery receipts, and baseline receipts in SQLite.
-- Fold repeated changes into their net result and delay delivery until activity settles or a maximum wait expires.
-- Preview the deliveries produced by a normal cycle or forced flush without changing state.
-- Validate source and state boundaries while keeping cursor representations private to their adapters.
-
-Applications provide configuration, credentials, scheduling, logging, HTTP session configuration, routes, rendering, and transport.
+- Read project details, translation context, and project-wide and per-locale progress.
+- Read current translations as a complete catalog, exact-key results, or text-search results.
+- Query missing keys and translations that need review in a selected locale.
+- List dot-separated translation keys and filter them by hierarchy prefix.
+- Read complete changes for selected keys in one locale.
+- Lazily read the project-wide change stream with locale, time, and anchor boundaries.
+- Use a caller-owned `requests.Session` when connection policy must be configured by the application.
 
 ## Project structure
 
 ```text
 noctalia_i18n_core/
-├── sources/            # Translation source contracts and adapters
-│   └── noctalia.py     # Noctalia Translate adapter
-├── models.py           # Shared domain values
-├── monitor.py          # Collection, routing, folding, and batch policy
-└── state.py            # SQLite checkpoints and delivery state
+├── client.py   # Website requests and response validation
+└── models.py   # Normalized project and change values
 ```
 
 ## Installation
-
-Install from PyPI with uv:
 
 ```bash
 uv add noctalia-i18n-core
@@ -43,165 +36,211 @@ pip install noctalia-i18n-core
 
 ## Usage
 
-The following example monitors Simplified Chinese changes, prints mature batches to the terminal, and acknowledges the corresponding records after successful output:
+### Create a client
 
 ```python
-from contextlib import closing
-from dataclasses import dataclass
-from pathlib import Path
+from noctalia_i18n_core import NoctaliaClient
 
-from noctalia_i18n_core import (
-    Change,
-    DeliveryPolicy,
-    Monitor,
-    NoctaliaSource,
-    SQLiteState,
+with NoctaliaClient("noctalia", timeout=30) as client:
+    key = "settings.widgets.settings.scroll-repeat.label"
+    value = client.translations(key, locales=("zh-Hans",))[key]["zh-Hans"]
+    changes = client.changes(key, locale="zh-Hans")
+
+    print(value)
+    print(changes[0].occurred_at if changes else "No changes")
+```
+
+The client closes only the session it creates. Pass a configured `requests.Session` when the application owns connection settings such as proxies or retries.
+
+### Project details and progress
+
+`project()` makes one project request and returns the public name, description, translation context, and current progress. Project and locale progress use the integer percentage shown by the website. The review count identifies translations whose English source changed after that translation was last saved.
+
+```python
+project = client.project()
+
+print(project.name, project.key_count, project.language_count, project.progress)
+for locale in project.locales:
+    print(
+        locale.code,
+        locale.progress,
+        locale.missing_count,
+        locale.review_count,
+    )
+```
+
+### Current translations
+
+`translations()` reads one or more exact keys in one batch request. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
+
+```python
+values = client.translations(
+    "settings.widgets.settings.scroll-repeat.description",
+    "settings.widgets.settings.scroll-repeat.label",
+    locales=("zh-Hans", "en"),
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ChineseRoute:
-    id: str = "zh-Hans"
-    delivery: DeliveryPolicy = DeliveryPolicy(
-        quiet_seconds=60,
-        max_wait_seconds=600,
-        fold_changes=True,
-    )
-    notify_baseline: bool = False
-
-    def accepts_locale(self, locale: str) -> bool:
-        return locale == "zh-Hans"
-
-    def matches(self, change: Change) -> bool:
-        return self.accepts_locale(change.locale)
-
-
-with (
-    closing(NoctaliaSource("noctalia", timeout=30)) as source,
-    closing(SQLiteState(Path("state.sqlite3"))) as state,
-):
-    monitor = Monitor(
-        source,
-        state,
-        (ChineseRoute(),),
-        retention_days=180,
-    )
-    result = monitor.run()
-
-    for route_id in result.baseline_routes:
-        print(route_id, result.scanned, result.source_texts)
-        state.acknowledge_baseline(route_id)
-
-    for route_id, deliveries in result.deliveries.items():
-        for delivery in deliveries:
-            change = delivery.change
-            print(route_id, change.action, change.key, change.new_value)
-        state.acknowledge(route_id, deliveries)
 ```
 
-The first run establishes the current position as a baseline without replaying existing history. The application then schedules the same workflow repeatedly: the monitor persists the new cursor and matching changes before returning batches whose waiting policy has matured. The example handles a complete batch at once. A real transport should acknowledge only the `Delivery` values contained in each successful external request.
-
-`Monitor` does not schedule itself, render messages, or perform transport calls. A synchronous application can handle results directly. An asynchronous application can briefly open the source and state in a worker thread, run the monitor, send its result in the event loop, and reopen the state in a worker to acknowledge success. Do not use the same `NoctaliaSource` or `SQLiteState` instance across threads, and serialize collection and reset cycles that share a state file.
-
-## Sources
-
-`NoctaliaSource(project, timeout, session=None)` reads structured Recent Changes data and the English export from Noctalia Translate. Project identifiers use lowercase letters, digits, and single hyphens, matching identifiers such as `noctalia`, `official-plugins`, and `community-plugins`.
-
-- `poll(None)` returns the newest cursor and a complete English source snapshot without replaying history.
-- `poll(cursor)` returns every available newer change and follows reported history pages until it finds the previous event.
-- A cursor from another source or project fails explicitly instead of silently creating a new baseline.
-- `history(page)` returns one upstream page in its native newest-first order.
-- `close()` closes only a session created by the source; a supplied session remains caller-owned.
-
-Source cursors are JSON values but intentionally opaque. Callers must persist and return them unchanged.
-
-Custom sources implement `Source` and return `PollResult`. An initial poll must include the complete source-language mapping. A later poll may omit it when its normalized English changes are sufficient to advance the stored snapshot.
-
-Call the source directly when durable monitoring is not required:
+`catalog()` makes one complete export request and returns `{key: {locale: value}}`. It is intended for callers that need every current translation.
 
 ```python
-from contextlib import closing
-
-from noctalia_i18n_core import NoctaliaSource
-
-with closing(NoctaliaSource("noctalia", timeout=30)) as source:
-    baseline = source.poll(None)
-    result = source.poll(baseline.cursor)
-
-for change in result.changes:
-    print(change.locale, change.action, change.key)
+catalog = client.catalog()
+source_text = catalog[
+    "settings.widgets.settings.scroll-repeat.description"
+]["en"]
 ```
 
-A real application should persist the cursor and return it unchanged in the next run. Subsequent results contain unique changes ordered oldest first.
+### Text search
 
-## Monitoring
-
-`Monitor` combines a `Source`, state store, and sequence of routes:
+`search_translations()` searches the key and current value in `search_locale`, follows all result pages, and reads the requested result locales for the matching keys. If `locales` is omitted, the result contains only `search_locale`.
 
 ```python
-result = monitor.run()                    # Collect and return mature batches
-result = monitor.run(flush=True)          # Also return immature batches
-preview = monitor.preview()               # Preview the cycle without writes
-preview = monitor.preview(flush=True)     # Preview a forced flush
-result = monitor.reset("baseline")        # Replace the baseline; keep delivery state
-result = monitor.reset("full")            # Clear delivery state; set a new baseline
+matches = client.search_translations(
+    "确认",
+    search_locale="zh-Hans",
+    locales=("zh-Hans", "en"),
+)
 ```
 
-`run()` atomically advances the source checkpoint and enqueues matching changes before returning mature batches through `MonitorResult.deliveries`. Pending records survive restarts and transport failures. After a successful request, the application calls `acknowledge(route_id, deliveries)` on the state store so delivery receipts prevent the same changes from being enqueued again for that route.
+### Missing translations and reviews
 
-`preview()` combines stored pending records with newly observed changes and applies the same waiting, filtering, and folding policy as `run()` without modifying state. Pass `flush=True` to preview a forced flush.
+`missing_keys()` returns keys without a current translation in one locale. `reviews()` returns translations whose English source changed after the translation was last saved, including the previous and current English source. Both queries accept `query` to filter their results.
 
-`MonitorResult.baseline_routes` lists routes whose baseline notices remain unacknowledged. After sending one successfully, the application calls `acknowledge_baseline(route_id)` on the state store; unacknowledged routes reappear in later cycles. `reset()` treats the new baseline as not requiring a notice by default and returns its routes only when `notify=True` is passed. The `baseline` mode preserves outbox and receipt state; `full` clears all monitoring state before establishing the new baseline.
+```python
+missing = client.missing_keys("fr", query="scroll")
+reviews = client.reviews("fr")
 
-## Routes and delivery
+for review in reviews:
+    print(review.key, review.old_source, review.new_source)
+```
 
-`Route` is a structural contract with the following members:
+### Translation keys
 
-| Member | Purpose |
+`keys()` makes one key-tree request and returns the complete key list. A `prefix` matches a complete dot-separated hierarchy rather than an arbitrary string prefix.
+
+```python
+widget_keys = client.keys(prefix="settings.widgets")
+```
+
+### Changes for selected keys
+
+`changes()` reads the complete changes for one or more exact keys in one locale. The returned tuple is ordered from newest to oldest; multiple key results are merged in that order.
+
+```python
+changes = client.changes(
+    "settings.widgets.settings.scroll-repeat.description",
+    locale="zh-Hans",
+)
+for change in changes:
+    print(change.occurred_at, change.action, change.new_value)
+```
+
+### Project change stream
+
+`iter_changes()` lazily reads the project-wide change stream in the order supplied by the website. `since` and `until` are inclusive, timezone-aware boundaries and are normalized to UTC. `locale` restricts the stream to one locale.
+
+```python
+from datetime import UTC, datetime
+
+recent = client.iter_changes(
+    locale="zh-Hans",
+    since=datetime(2026, 8, 1, tzinfo=UTC),
+)
+for change in recent:
+    print(change.key, change.action)
+```
+
+`after` is a website change ID. The client confirms the anchor before yielding a result and raises `RuntimeError` when it is absent. `on_progress` receives the completed page number and current total page count after each request.
+
+## API reference
+
+### `NoctaliaClient`
+
+```python
+NoctaliaClient(project, *, timeout, session=None)
+```
+
+`project` is the website project identifier. `timeout` is a positive finite number of seconds. `session` may be a caller-owned `requests.Session`; the client closes it only when it created the session itself.
+
+| Member | Result |
 | --- | --- |
-| `id` | Stable route identifier |
-| `delivery` | Route-local `DeliveryPolicy` |
-| `notify_baseline` | Whether the route receives a baseline notification |
-| `accepts_locale(locale)` | Whether the route subscribes to a locale |
-| `matches(change)` | Whether the route accepts a normalized change |
+| `slug` | The project identifier passed to the constructor |
+| `project()` | `Project` details and current translation progress |
+| `keys(*, prefix=None)` | `tuple[str, ...]` of complete or prefix-matched keys |
+| `catalog()` | `dict[str, dict[str, str]]` containing the complete current catalog |
+| `translations(key, *keys, locales=None)` | Key-first exact translations |
+| `search_translations(query, *, search_locale, locales=None)` | Key-first translations for text matches |
+| `missing_keys(locale, *, query=None)` | Missing translation keys in one locale |
+| `reviews(locale, *, query=None)` | Translations needing review in one locale |
+| `changes(key, *keys, locale)` | Newest-first exact-key changes |
+| `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | Lazy project-wide change iterator |
+| `close()` | Closes an owned HTTP session |
 
-Route IDs must be non-empty and unique within a monitoring cycle. A route ID identifies a durable subscription rather than a transport address. Use a stable value without credentials, not a mutable display name or Webhook URL.
+`translations()` and `changes()` require at least one positional key. `translations()` returns requested keys even when their result is empty. `changes()` returns a tuple and requests each selected key from the website. `iter_changes()` never accepts keys and remains lazy until iteration begins.
 
-`Monitor` snapshots its routes at construction. After persisted subscriptions change, create a new monitor from the current routes. The next `run()` removes outbox records and baseline receipts for routes no longer present.
+Invalid arguments raise `ValueError`. Network failures and responses that do not match the website contract raise `RuntimeError`.
 
-`DeliveryPolicy` controls outbox preparation:
+### `Project` and `Locale`
 
-| Field | Purpose |
+`Project` contains public project details and progress aggregated from the current locale states:
+
+| Field or property | Description |
 | --- | --- |
-| `quiet_seconds` | Required inactivity before automatic delivery |
-| `max_wait_seconds` | Maximum age of the oldest pending record |
-| `fold_changes` | Whether to fold each locale and key into its net change |
+| `slug` | Website project identifier |
+| `name` | Project name |
+| `description` | Project description, or `None` when absent |
+| `translation_context` | Translation guidance and terminology, or `None` when absent |
+| `key_count` | Current translation key count |
+| `locales` | Website-ordered `tuple[Locale, ...]` |
+| `language_count` | Configured locale count |
+| `translation_count` | Current translation count |
+| `missing_count` | Current missing translation count |
+| `review_count` | Current translations that need review |
+| `progress` | Integer completion percentage shown by the website |
 
-`max_wait_seconds` must not be less than `quiet_seconds`. A value of zero makes the corresponding delivery condition immediate.
+Each `Locale` contains `code`, `translation_count`, `missing_count`, `review_count`, and the derived `progress`. Locales without any current translations remain present in the project result.
 
-Core defines no transport protocol and has no event-loop dependency. An application may split a route batch across multiple external requests and call `acknowledge()` after each success with exactly the `Delivery` values included in that request. If a later request fails, the state store retains every unacknowledged record. A process exit after a successful send but before its acknowledgement may repeat that request on the next run. These at-least-once semantics let Webhooks, bot channels, threads, message queues, and other transports share the same collection and delivery state.
+### `Review`
 
-## State
+Each review contains `key`, `locale`, `old_source`, `new_source`, and `translation_url`. `old_source` is `None` when no previous source text exists. The source difference comes from the website's Needs review query and is distinct from changes to the translation itself.
 
-`SQLiteState(path, read_only=False)` persists:
+### `Change`
 
-- the opaque source cursor;
-- the matching complete English snapshot;
-- pending deliveries by route;
-- delivery receipts;
-- baseline receipts.
+Each change has the following fields:
 
-State updates use SQLite transactions. An incompatible schema is rejected without modification. Read-only state opens an existing database without writes and uses an in-memory empty state when the file does not exist.
+| Field | Description |
+| --- | --- |
+| `id` | Website change identifier |
+| `key` | Translation key |
+| `locale` | Locale changed by the record |
+| `action` | `added`, `modified`, or `deleted` |
+| `old_value` | Previous text, or `None` for an addition |
+| `new_value` | New text, or `None` for a deletion |
+| `occurred_at` | UTC-aware `datetime` |
+| `translation_url` | Translation page for the key and locale |
+| `actor_login` | Contributor login, or `None` for an automated change |
+| `actor_url` | Contributor profile URL, when available |
+| `actor_avatar_url` | Contributor avatar URL, when available |
 
-`SQLiteState.summary()` returns initialization status, update time, source-snapshot size, delivery and baseline receipt counts, and pending delivery and route counts. Delivery receipts older than the monitor's configured retention period are pruned after successful cycles.
+`ChangeAction` is the literal type `"added" | "modified" | "deleted"`. `SOURCE_LOCALE` is `"en"`.
 
-## API contracts
+## Performance reference
 
-Supported caller-facing names are exported directly from `noctalia_i18n_core`; submodules organize implementation and are not required for normal imports.
+These reference measurements were taken from the public `noctalia` project in August 2026. They describe website requests without a local cache.
 
-`JsonValue` describes opaque JSON-shaped cursors. JSON validation and normalization remain internal. Invalid constructor arguments raise `ValueError`; source and SQLite failures raise `RuntimeError`. The package does not define a custom exception hierarchy.
+| Operation | Requests | Reference result |
+| --- | --- | --- |
+| `project()` | One project page request | Progress for 25 locales, about 23 KB |
+| `catalog()` | One complete export | 42,857 strings, about 2.23 MB, 4.4–4.8 s |
+| `translations()` | One batch request | Two keys and two locales, about 1.3 KB, about 1.4 s |
+| `search_translations()` | Search pages plus one batch request | 19 Simplified Chinese matches, about 1.7 s |
+| `missing_keys()` | One missing query | All matching keys for the selected locale |
+| `reviews()` | One review query | Matching keys and their English source difference |
+| `keys()` | One key-tree page | About 2,474 keys and 147 KB |
+| `changes()` | One request per selected key | Example key, about 1.3 KB and 1.4 s |
+| `iter_changes()` | Recent Changes pages until the boundary | Depends on the requested range |
 
-`SQLiteState` owns its database connection until `close()` is called. `NoctaliaSource` closes only a session it creates.
+Latency, server load, and project growth affect these values. Exact queries and text searches do not download the complete catalog.
 
 ## Development
 
@@ -211,7 +250,7 @@ Install the locked development environment:
 uv sync --locked
 ```
 
-Check formatting, code rules, static types, and all tests:
+Run formatting, linting, type checking, and tests:
 
 ```bash
 uv run ruff format --check .
@@ -220,15 +259,13 @@ uv run basedpyright
 uv run python -m unittest discover -v
 ```
 
-Run one test module:
+Run the live contract tests explicitly to verify every public operation against the current public projects on Noctalia Translate:
 
 ```bash
-uv run python -m unittest tests.test_noctalia -v
+uv run python -m unittest tests.live -v
 ```
 
-## Build
-
-Build the wheel and source distribution, then validate their package metadata:
+Build and inspect both distributions:
 
 ```bash
 uv build --no-sources --clear
@@ -237,4 +274,4 @@ uvx twine check --strict dist/*
 
 ## License
 
-[MIT](https://github.com/Obelusod/noctalia-i18n-core/blob/main/LICENSE)
+[MIT](LICENSE)
