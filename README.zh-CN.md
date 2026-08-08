@@ -85,9 +85,7 @@ values = client.translations(
 
 ```python
 catalog = client.catalog()
-source_text = catalog[
-    "settings.widgets.settings.scroll-repeat.description"
-]["en"]
+source_text = catalog["settings.widgets.settings.scroll-repeat.description"]["en"]
 ```
 
 ### 文本搜索
