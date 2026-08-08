@@ -2,34 +2,27 @@
 
 [English](https://github.com/Obelusod/noctalia-i18n-core/blob/main/README.md)
 
-Noctalia i18n Core 采集 [Noctalia Translate](https://i18n.noctalia.dev/projects) 的规范化翻译变更，并使用 SQLite 持久化采集位置、源文案快照、待投递记录和投递回执。调用方通过路由筛选变更，使用任意同步或异步传输发送成熟批次，并在成功后确认。
+Noctalia i18n Core 是一个只读 Python 客户端，用于读取 [Noctalia Translate](https://i18n.noctalia.dev/) 的项目进度、当前译文和变更记录。存储、调度、投递和应用策略由调用方负责。
 
-## 功能
+## 核心能力
 
-- 通过与项目绑定的不透明游标采集规范化的新增、修改和删除。
-- 不设置任意页数上限，恢复存储游标之后所有仍可获取的变更。
-- 在具有独立 locale、action 和投递策略的多条路由间共享一次数据源轮询。
-- 使用 SQLite 持久化源文案快照、路由 outbox、投递回执和基线回执。
-- 将重复变更折叠为净结果，并等待活动平息或最长等待时间到达后投递。
-- 在不修改状态的情况下预览当前周期或强制刷新将产生的投递。
-- 校验数据源与状态边界，同时将游标表示限制在对应适配器内部。
-
-应用负责配置、凭据、调度、日志、HTTP session 配置、路由、渲染和传输。
+- 读取项目信息、翻译上下文以及项目和各 locale 的翻译进度。
+- 以完整目录、精确键结果或文本搜索结果读取当前译文。
+- 查询指定 locale 的缺失键和待复核译文。
+- 列出点分隔的翻译键并按层级前缀筛选。
+- 读取指定 locale 中一个或多个键的完整变更记录。
+- 按 locale、时间和锚点边界惰性读取项目级变更流。
+- 在应用需要配置连接策略时使用调用方管理的 `requests.Session`。
 
 ## 项目结构
 
 ```text
 noctalia_i18n_core/
-├── sources/            # 翻译数据源协议与适配器
-│   └── noctalia.py     # Noctalia Translate 适配器
-├── models.py           # 共享领域值
-├── monitor.py          # 采集、路由、折叠与批次策略
-└── state.py            # SQLite 检查点与投递状态
+├── client.py   # 网站请求与响应验证
+└── models.py   # 规范化的项目与变更值
 ```
 
 ## 安装
-
-使用 uv 从 PyPI 安装：
 
 ```bash
 uv add noctalia-i18n-core
@@ -43,165 +36,211 @@ pip install noctalia-i18n-core
 
 ## 使用指南
 
-下面的示例监听简体中文变更，将成熟批次输出到终端，并在输出成功后确认对应记录：
+### 创建客户端
 
 ```python
-from contextlib import closing
-from dataclasses import dataclass
-from pathlib import Path
+from noctalia_i18n_core import NoctaliaClient
 
-from noctalia_i18n_core import (
-    Change,
-    DeliveryPolicy,
-    Monitor,
-    NoctaliaSource,
-    SQLiteState,
+with NoctaliaClient("noctalia", timeout=30) as client:
+    key = "settings.widgets.settings.scroll-repeat.label"
+    value = client.translations(key, locales=("zh-Hans",))[key]["zh-Hans"]
+    changes = client.changes(key, locale="zh-Hans")
+
+    print(value)
+    print(changes[0].occurred_at if changes else "暂无变更")
+```
+
+客户端只关闭由自身创建的 session。需要由应用管理代理或重试等连接设置时，应传入已配置的 `requests.Session`。
+
+### 项目信息与翻译进度
+
+`project()` 执行一次项目请求，返回网站公开的项目名称、说明、翻译上下文和当前进度。项目与 locale 的完成度均为网站显示的整数百分比；待复核数表示英文原文在对应译文最后保存后发生过变更的条目数。
+
+```python
+project = client.project()
+
+print(project.name, project.key_count, project.language_count, project.progress)
+for locale in project.locales:
+    print(
+        locale.code,
+        locale.progress,
+        locale.missing_count,
+        locale.review_count,
+    )
+```
+
+### 当前译文
+
+`translations()` 在一次批量请求中读取一个或多个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
+
+```python
+values = client.translations(
+    "settings.widgets.settings.scroll-repeat.description",
+    "settings.widgets.settings.scroll-repeat.label",
+    locales=("zh-Hans", "en"),
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ChineseRoute:
-    id: str = "zh-Hans"
-    delivery: DeliveryPolicy = DeliveryPolicy(
-        quiet_seconds=60,
-        max_wait_seconds=600,
-        fold_changes=True,
-    )
-    notify_baseline: bool = False
-
-    def accepts_locale(self, locale: str) -> bool:
-        return locale == "zh-Hans"
-
-    def matches(self, change: Change) -> bool:
-        return self.accepts_locale(change.locale)
-
-
-with (
-    closing(NoctaliaSource("noctalia", timeout=30)) as source,
-    closing(SQLiteState(Path("state.sqlite3"))) as state,
-):
-    monitor = Monitor(
-        source,
-        state,
-        (ChineseRoute(),),
-        retention_days=180,
-    )
-    result = monitor.run()
-
-    for route_id in result.baseline_routes:
-        print(route_id, result.scanned, result.source_texts)
-        state.acknowledge_baseline(route_id)
-
-    for route_id, deliveries in result.deliveries.items():
-        for delivery in deliveries:
-            change = delivery.change
-            print(route_id, change.action, change.key, change.new_value)
-        state.acknowledge(route_id, deliveries)
 ```
 
-首次运行建立当前位置的基线，不重放已有历史。之后由应用的调度机制重复运行相同流程：监控器先持久化新游标和匹配变更，再返回已满足等待策略的批次。示例一次处理整个批次；真实传输应在每次外部请求成功后，只确认该请求实际包含的 `Delivery`。
-
-`Monitor` 不负责循环运行、渲染或传输。同步应用可以直接处理结果。异步应用可以在工作线程中短暂打开数据源与状态库并运行监控，在事件循环中发送结果，再在工作线程中重新打开状态库完成确认；同一个 `NoctaliaSource` 或 `SQLiteState` 实例不应跨线程使用，同一状态文件的采集与重置周期必须串行执行。
-
-## 数据源
-
-`NoctaliaSource(project, timeout, session=None)` 读取 Noctalia Translate 的结构化 Recent Changes 数据和英文导出。项目标识符使用小写字母、数字和单个连字符，例如 `noctalia`、`official-plugins` 和 `community-plugins`。
-
-- `poll(None)` 返回最新游标和完整英文源文案快照，不重放历史。
-- `poll(cursor)` 返回所有仍可获取的新变更，并沿上游报告的历史页查找前一事件。
-- 属于其他数据源或项目的游标会明确失败，不会静默创建新基线。
-- `history(page)` 按上游原有的从新到旧顺序返回一页记录。
-- `close()` 只关闭数据源自行创建的 session；调用方传入的 session 仍归调用方所有。
-
-数据源游标是 JSON 值，但有意保持不透明。调用方必须原样持久化并传回。
-
-自定义数据源实现 `Source` 并返回 `PollResult`。首次轮询必须包含完整源语言映射；后续轮询在规范化英文变更足以推进存储快照时可以省略该映射。
-
-如果只需要采集而不需要持久监控，可以直接调用数据源：
+`catalog()` 执行一次完整导出请求并返回 `{key: {locale: value}}`。只有需要全部当前译文时才使用它。
 
 ```python
-from contextlib import closing
-
-from noctalia_i18n_core import NoctaliaSource
-
-with closing(NoctaliaSource("noctalia", timeout=30)) as source:
-    baseline = source.poll(None)
-    result = source.poll(baseline.cursor)
-
-for change in result.changes:
-    print(change.locale, change.action, change.key)
+catalog = client.catalog()
+source_text = catalog[
+    "settings.widgets.settings.scroll-repeat.description"
+]["en"]
 ```
 
-实际应用应持久化游标，并在下一次运行时原样传回。后续结果包含按发生时间从旧到新排列且不重复的变更。
+### 文本搜索
 
-## 监控
-
-`Monitor` 组合 `Source`、状态存储和一组路由：
+`search_translations()` 在 `search_locale` 中搜索键和值，遍历全部结果页，再读取匹配键所需的 locale。如果省略 `locales`，结果只包含 `search_locale`。
 
 ```python
-result = monitor.run()                    # 采集并返回已成熟的批次
-result = monitor.run(flush=True)          # 同时返回尚未成熟的批次
-preview = monitor.preview()               # 预览当前周期，不写入状态
-preview = monitor.preview(flush=True)     # 预览强制刷新结果
-result = monitor.reset("baseline")        # 替换基线并保留投递状态
-result = monitor.reset("full")            # 清空投递状态并建立新基线
+matches = client.search_translations(
+    "确认",
+    search_locale="zh-Hans",
+    locales=("zh-Hans", "en"),
+)
 ```
 
-`run()` 原子推进数据源检查点并将匹配变更写入 outbox，再通过 `MonitorResult.deliveries` 返回成熟批次。待处理记录会跨重启和传输失败保留；应用使用状态存储的 `acknowledge(route_id, deliveries)` 确认成功请求后，投递回执会防止相同变更再次进入同一路由。
+### 缺失与待复核译文
 
-`preview()` 合并已存储的待处理记录与新发现的变更，再应用与 `run()` 相同的等待、筛选和折叠策略，但不修改状态。传入 `flush=True` 可以预览强制刷新结果。
+`missing_keys()` 返回指定 locale 中没有当前译文的键。`reviews()` 返回英文原文在该译文最后保存后发生过变化的条目；每条结果同时包含变化前后的英文原文。两种查询均可使用 `query` 筛选结果。
 
-`MonitorResult.baseline_routes` 列出尚未确认的基线通知路由。应用成功发送后调用状态存储的 `acknowledge_baseline(route_id)`；未确认的路由会在后续周期再次返回。`reset()` 默认将新基线视为无需通知，传入 `notify=True` 才会返回相应路由。`baseline` 模式保留 outbox 和回执状态；`full` 在建立新基线前清空全部监控状态。
+```python
+missing = client.missing_keys("fr", query="scroll")
+reviews = client.reviews("fr")
 
-## 路由与投递
+for review in reviews:
+    print(review.key, review.old_source, review.new_source)
+```
 
-`Route` 是包含以下成员的结构化协议：
+### 翻译键
 
-| 成员 | 用途 |
+`keys()` 执行一次键树请求并返回完整翻译键列表。`prefix` 匹配以点分隔的完整层级，而非任意字符串前缀。
+
+```python
+widget_keys = client.keys(prefix="settings.widgets")
+```
+
+### 指定键的变更
+
+`changes()` 读取一个或多个精确键在指定 locale 中的完整变更记录。返回元组按最新到最旧排列；多个键的结果也按该顺序合并。
+
+```python
+changes = client.changes(
+    "settings.widgets.settings.scroll-repeat.description",
+    locale="zh-Hans",
+)
+for change in changes:
+    print(change.occurred_at, change.action, change.new_value)
+```
+
+### 项目变更流
+
+`iter_changes()` 按网站提供的顺序惰性读取项目级变更流。`since` 和 `until` 是包含边界的带时区时间，并会统一转换为 UTC；`locale` 将结果限制为一种 locale。
+
+```python
+from datetime import UTC, datetime
+
+recent = client.iter_changes(
+    locale="zh-Hans",
+    since=datetime(2026, 8, 1, tzinfo=UTC),
+)
+for change in recent:
+    print(change.key, change.action)
+```
+
+`after` 是网站变更标识。客户端会在产生结果前确认锚点；锚点不存在时抛出 `RuntimeError`。每次请求完成后，`on_progress` 接收已完成页码和当前总页数。
+
+## API 参考
+
+### `NoctaliaClient`
+
+```python
+NoctaliaClient(project, *, timeout, session=None)
+```
+
+`project` 是网站项目标识。`timeout` 是正的有限秒数。`session` 可以是调用方管理的 `requests.Session`；只有客户端自行创建 session 时才会负责关闭它。
+
+| 成员 | 返回值 |
 | --- | --- |
-| `id` | 稳定路由标识符 |
-| `delivery` | 路由独立的 `DeliveryPolicy` |
-| `notify_baseline` | 是否接收基线通知 |
-| `accepts_locale(locale)` | 是否订阅指定 locale |
-| `matches(change)` | 是否接受规范化变更 |
+| `slug` | 构造函数接收的项目标识 |
+| `project()` | 项目信息与当前翻译进度 `Project` |
+| `keys(*, prefix=None)` | 完整或按前缀筛选的键 `tuple[str, ...]` |
+| `catalog()` | 完整当前目录 `dict[str, dict[str, str]]` |
+| `translations(key, *keys, locales=None)` | 键优先的精确译文 |
+| `search_translations(query, *, search_locale, locales=None)` | 文本匹配键的键优先译文 |
+| `missing_keys(locale, *, query=None)` | 指定 locale 的缺失翻译键 |
+| `reviews(locale, *, query=None)` | 指定 locale 的待复核译文 |
+| `changes(key, *keys, locale)` | 按最新到最旧排列的精确键变更 |
+| `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | 惰性的项目级变更迭代器 |
+| `close()` | 关闭由客户端拥有的 HTTP session |
 
-路由 ID 在一个监控周期内必须非空且唯一。它标识持久订阅而非传输地址；应使用稳定且不含凭据的值，不应使用可变显示名称或 Webhook URL。
+`translations()` 和 `changes()` 至少需要一个位置键参数。`translations()` 即使结果为空也会返回请求的键。`changes()` 返回元组，并为每个请求键访问网站。`iter_changes()` 不接受键参数，只有开始迭代时才会发起请求。
 
-`Monitor` 在构造时保存路由快照。应用的持久订阅发生变化后，应使用最新路由创建新的监控器；下一次 `run()` 会清理已移除路由的 outbox 和基线回执。
+无效参数抛出 `ValueError`；网络故障以及不符合网站契约的响应抛出 `RuntimeError`。
 
-`DeliveryPolicy` 控制 outbox 准备行为：
+### `Project` 与 `Locale`
 
-| 字段 | 用途 |
+`Project` 包含项目的公开信息和由当前 locale 状态汇总的进度：
+
+| 字段或属性 | 说明 |
 | --- | --- |
-| `quiet_seconds` | 自动投递前所需的无活动时间 |
-| `max_wait_seconds` | 最早待处理记录的最长等待时间 |
-| `fold_changes` | 是否将同一 locale 和 key 折叠为净变更 |
+| `slug` | 网站项目标识 |
+| `name` | 项目名称 |
+| `description` | 项目说明；未设置时为 `None` |
+| `translation_context` | 翻译说明与术语约定；未设置时为 `None` |
+| `key_count` | 当前翻译键数 |
+| `locales` | 按网站顺序排列的 `tuple[Locale, ...]` |
+| `language_count` | 已配置 locale 数 |
+| `translation_count` | 当前已有译文总数 |
+| `missing_count` | 当前缺失译文总数 |
+| `review_count` | 当前待复核译文总数 |
+| `progress` | 与网站一致的整数完成百分比 |
 
-`max_wait_seconds` 不得小于 `quiet_seconds`。任一值为零时，对应的投递条件会立即满足。
+每个 `Locale` 包含 `code`、`translation_count`、`missing_count`、`review_count` 和派生的 `progress`。尚无任何译文的 locale 也会包含在项目结果中。
 
-本库不定义传输协议，也不依赖事件循环。调用方可以将同一路由批次拆成多次外部请求，并在每次成功后使用该请求实际包含的 `Delivery` 调用 `acknowledge()`。如果后续请求失败，状态存储会保留所有尚未确认的记录；如果进程在发送成功后、确认前退出，该请求可能在下次运行时重复。这种至少一次语义允许 Webhook、Bot 频道、线程、消息队列和其他传输共享相同的采集与投递状态。
+### `Review`
 
-## 状态
+每条待复核译文包含 `key`、`locale`、`old_source`、`new_source` 和 `translation_url`；不存在旧原文时，`old_source` 为 `None`。原文差异来自网站的 Needs review 查询，不代表译文自身的变更记录。
 
-`SQLiteState(path, read_only=False)` 持久化：
+### `Change`
 
-- 不透明数据源游标；
-- 与游标匹配的完整英文快照；
-- 按路由划分的待处理投递；
-- 投递回执；
-- 基线回执。
+每条变更记录包含以下字段：
 
-状态更新使用 SQLite 事务。不兼容的结构会在不修改数据库的情况下被拒绝。只读状态不会写入现有数据库；文件不存在时使用内存中的空状态。
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 网站变更标识 |
+| `key` | 翻译键 |
+| `locale` | 发生变更的 locale |
+| `action` | `added`、`modified` 或 `deleted` |
+| `old_value` | 变更前文案；新增时为 `None` |
+| `new_value` | 变更后文案；删除时为 `None` |
+| `occurred_at` | 带 UTC 时区的 `datetime` |
+| `translation_url` | 对应键和 locale 的翻译页面 |
+| `actor_login` | 贡献者登录名；自动变更为 `None` |
+| `actor_url` | 可用时的贡献者资料链接 |
+| `actor_avatar_url` | 可用时的贡献者头像链接 |
 
-`SQLiteState.summary()` 返回初始化状态、更新时间、源文案快照大小、投递与基线回执数量以及待处理投递和路由数量。成功完成监控周期后，会按照配置的保留期限清理投递回执。
+`ChangeAction` 是字面量类型 `"added" | "modified" | "deleted"`。`SOURCE_LOCALE` 的值为 `"en"`。
 
-## API 约定
+## 性能参考
 
-受支持的调用方接口直接从 `noctalia_i18n_core` 导出；子模块仅用于组织实现，常规导入无需依赖子模块。
+以下数据来自 2026 年 8 月公开的 `noctalia` 项目，描述的是网络请求，不包含本地缓存。
 
-`JsonValue` 描述不透明的 JSON 结构游标。JSON 校验与规范化保持为内部实现。无效构造参数抛出 `ValueError`；数据源与 SQLite 失败抛出 `RuntimeError`。本库不定义自有异常层次。
+| 操作 | 请求 | 参考结果 |
+| --- | --- | --- |
+| `project()` | 一次项目页面请求 | 25 个 locale 的项目进度，约 23 KB |
+| `catalog()` | 一次完整导出 | 42,857 条译文，约 2.23 MB，约 4.4–4.8 秒 |
+| `translations()` | 一次批量请求 | 两个键、两个 locale，约 1.3 KB，约 1.4 秒 |
+| `search_translations()` | 搜索页面及一次批量请求 | 简体中文匹配 19 个，约 1.7 秒 |
+| `missing_keys()` | 一次缺失查询 | 返回指定 locale 的全部匹配键 |
+| `reviews()` | 一次待复核查询 | 返回匹配键及其英文原文差异 |
+| `keys()` | 一次键树请求 | 约 2,474 个键，147 KB |
+| `changes()` | 每个请求键一次请求 | 示例键约 1.3 KB，约 1.4 秒 |
+| `iter_changes()` | 读取变更页直到边界 | 取决于请求范围 |
 
-`SQLiteState` 在调用 `close()` 前持有其数据库连接。`NoctaliaSource` 只关闭自行创建的 session。
+实际耗时受网络延迟、服务器负载和项目规模影响。精确查询和文本搜索不会下载完整当前目录。
 
 ## 开发
 
@@ -211,7 +250,7 @@ result = monitor.reset("full")            # 清空投递状态并建立新基线
 uv sync --locked
 ```
 
-检查格式、代码规则、静态类型和全部测试：
+运行格式化、代码检查、类型检查和测试：
 
 ```bash
 uv run ruff format --check .
@@ -220,15 +259,13 @@ uv run basedpyright
 uv run python -m unittest discover -v
 ```
 
-运行单个测试模块：
+显式运行在线契约测试，核验所有公开操作与 Noctalia Translate 当前公开项目的实际响应：
 
 ```bash
-uv run python -m unittest tests.test_noctalia -v
+uv run python -m unittest tests.live -v
 ```
 
-## 构建
-
-构建 wheel 与源码包并校验包元数据：
+构建并检查 wheel 和源码包：
 
 ```bash
 uv build --no-sources --clear
@@ -237,4 +274,4 @@ uvx twine check --strict dist/*
 
 ## 许可证
 
-[MIT](https://github.com/Obelusod/noctalia-i18n-core/blob/main/LICENSE)
+[MIT](LICENSE)
