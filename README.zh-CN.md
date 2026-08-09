@@ -274,6 +274,8 @@ uv run basedpyright
 uv run python -m unittest discover -v
 ```
 
+默认测试验证数据模型、响应解析和客户端行为，不访问外部服务。
+
 显式运行在线契约测试，核验所有公开操作与 Noctalia Translate 当前公开项目的实际响应：
 
 ```bash
