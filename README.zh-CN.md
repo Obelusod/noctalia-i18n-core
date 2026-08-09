@@ -8,10 +8,11 @@ Noctalia i18n Core 是一个只读 Python 客户端，用于读取 [Noctalia Tra
 
 - 读取项目信息、翻译上下文以及项目和各 locale 的翻译进度。
 - 以完整目录、精确键结果或文本搜索结果读取当前译文。
-- 查询指定 locale 的缺失键和待复核译文。
+- 查询指定 locale 的缺失译文和待复核译文。
 - 列出点分隔的翻译键并按层级前缀筛选。
 - 读取指定 locale 中一个或多个键的完整变更记录。
 - 按 locale、时间和锚点边界惰性读取项目级变更流。
+- 读取经过验证且带持久化游标的变更页，支持可恢复的长时间扫描。
 - 在应用需要配置连接策略时使用调用方管理的 `requests.Session`。
 
 ## 项目结构
@@ -71,7 +72,7 @@ for locale in project.locales:
 
 ### 当前译文
 
-`translations()` 在一次批量请求中读取一个或多个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
+`translations()` 按网站使用的批量大小读取一个或多个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
 
 ```python
 values = client.translations(
@@ -102,14 +103,17 @@ matches = client.search_translations(
 
 ### 缺失与待复核译文
 
-`missing_keys()` 返回指定 locale 中没有当前译文的键。`reviews()` 返回英文原文在该译文最后保存后发生过变化的条目；每条结果同时包含变化前后的英文原文。两种查询均可使用 `query` 筛选结果。
+`missing()` 返回指定 locale 中缺少译文的原文条目，`reviews()` 返回译文保存后英文原文发生变化的条目。两者都包含键、locale、当前原文及翻译页面；待复核条目还包含此前的原文。两种查询均可使用 `query` 筛选结果。
 
 ```python
-missing = client.missing_keys("fr", query="scroll")
+missing = client.missing("fr", query="scroll")
 reviews = client.reviews("fr")
 
+for item in missing:
+    print(item.key, item.source, item.translation_url)
+
 for review in reviews:
-    print(review.key, review.old_source, review.new_source)
+    print(review.key, review.previous_source, review.source)
 ```
 
 ### 翻译键
@@ -150,6 +154,13 @@ for change in recent:
 
 `after` 是网站变更标识。客户端会在产生结果前确认锚点；锚点不存在时抛出 `RuntimeError`。每次请求完成后，`on_progress` 接收已完成页码和当前总页数。
 
+`change_pages()` 以不可变的 `ChangePage` 返回同一变更流。`start_page` 选择从一开始的页面；`cursor` 是调用方保存的不透明续读位置，客户端会丢弃该位置及其之前的新记录并继续返回更旧的页面。
+
+```python
+page = next(client.change_pages(start_page=1))
+print(page.number, page.total_pages, page.cursor)
+```
+
 ## API 参考
 
 ### `NoctaliaClient`
@@ -163,15 +174,17 @@ NoctaliaClient(project, *, timeout, session=None)
 | 成员 | 返回值 |
 | --- | --- |
 | `slug` | 构造函数接收的项目标识 |
+| `translation_url(key, locale)` | 指定键与 locale 的翻译页面 |
 | `project()` | 项目信息与当前翻译进度 `Project` |
 | `keys(*, prefix=None)` | 完整或按前缀筛选的键 `tuple[str, ...]` |
 | `catalog()` | 完整当前目录 `dict[str, dict[str, str]]` |
 | `translations(key, *keys, locales=None)` | 键优先的精确译文 |
 | `search_translations(query, *, search_locale, locales=None)` | 文本匹配键的键优先译文 |
-| `missing_keys(locale, *, query=None)` | 指定 locale 的缺失翻译键 |
+| `missing(locale, *, query=None)` | 缺失译文及其英文原文 |
 | `reviews(locale, *, query=None)` | 指定 locale 的待复核译文 |
 | `changes(key, *keys, locale)` | 按最新到最旧排列的精确键变更 |
 | `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | 惰性的项目级变更迭代器 |
+| `change_pages(*, locale=None, start_page=1, cursor=None)` | 带不透明续读游标、经过验证的惰性变更页 |
 | `close()` | 关闭由客户端拥有的 HTTP session |
 
 `translations()` 和 `changes()` 至少需要一个位置键参数。`translations()` 即使结果为空也会返回请求的键。`changes()` 返回元组，并为每个请求键访问网站。`iter_changes()` 不接受键参数，只有开始迭代时才会发起请求。
@@ -198,9 +211,9 @@ NoctaliaClient(project, *, timeout, session=None)
 
 每个 `Locale` 包含 `code`、`translation_count`、`missing_count`、`review_count` 和派生的 `progress`。尚无任何译文的 locale 也会包含在项目结果中。
 
-### `Review`
+### `Missing` 与 `Review`
 
-每条待复核译文包含 `key`、`locale`、`old_source`、`new_source` 和 `translation_url`；不存在旧原文时，`old_source` 为 `None`。原文差异来自网站的 Needs review 查询，不代表译文自身的变更记录。
+两种模型都包含 `key`、`locale`、`source` 和 `translation_url`。`Review` 还包含 `previous_source`；不存在此前原文时为 `None`。这里的原文差异不代表译文本身的变更记录。
 
 ### `Change`
 
@@ -222,6 +235,10 @@ NoctaliaClient(project, *, timeout, session=None)
 
 `ChangeAction` 是字面量类型 `"added" | "modified" | "deleted"`。`SOURCE_LOCALE` 的值为 `"en"`。
 
+### `ChangePage`
+
+`ChangePage` 包含 `number`、`total_pages`、`changes` 和 `cursor`。`cursor` 对应页面中最后一条原始网站记录，即使该记录没有规范化为 `Change` 也会保留；调用方应将其视为只用于继续读取的不透明值。
+
 ## 性能参考
 
 以下数据来自 2026 年 8 月公开的 `noctalia` 项目，描述的是网络请求，不包含本地缓存。
@@ -230,9 +247,9 @@ NoctaliaClient(project, *, timeout, session=None)
 | --- | --- | --- |
 | `project()` | 一次项目页面请求 | 25 个 locale 的项目进度，约 23 KB |
 | `catalog()` | 一次完整导出 | 42,857 条译文，约 2.23 MB，约 4.4–4.8 秒 |
-| `translations()` | 一次批量请求 | 两个键、两个 locale，约 1.3 KB，约 1.4 秒 |
+| `translations()` | 每 50 个键一次批量请求 | 两个键、两个 locale，约 1.3 KB，约 1.4 秒 |
 | `search_translations()` | 搜索页面及一次批量请求 | 简体中文匹配 19 个，约 1.7 秒 |
-| `missing_keys()` | 一次缺失查询 | 返回指定 locale 的全部匹配键 |
+| `missing()` | 一次缺失查询及分批原文查询 | 返回匹配条目及其英文原文 |
 | `reviews()` | 一次待复核查询 | 返回匹配键及其英文原文差异 |
 | `keys()` | 一次键树请求 | 约 2,474 个键，147 KB |
 | `changes()` | 每个请求键一次请求 | 示例键约 1.3 KB，约 1.4 秒 |
