@@ -274,6 +274,8 @@ uv run basedpyright
 uv run python -m unittest discover -v
 ```
 
+The default suite validates models, response parsing, and client behavior without accessing external services.
+
 Run the live contract tests explicitly to verify every public operation against the current public projects on Noctalia Translate:
 
 ```bash
