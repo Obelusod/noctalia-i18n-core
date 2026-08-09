@@ -4,14 +4,15 @@
 
 Noctalia i18n Core is a read-only Python client for project progress, current translations, and changes from [Noctalia Translate](https://i18n.noctalia.dev/). Storage, scheduling, delivery, and application policy belong to the caller.
 
-## Core capabilities
+## Capabilities
 
 - Read project details, translation context, and project-wide and per-locale progress.
 - Read current translations as a complete catalog, exact-key results, or text-search results.
-- Query missing keys and translations that need review in a selected locale.
+- Query missing translations and translations that need review in a selected locale.
 - List dot-separated translation keys and filter them by hierarchy prefix.
 - Read complete changes for selected keys in one locale.
 - Lazily read the project-wide change stream with locale, time, and anchor boundaries.
+- Read validated change pages with a durable cursor for resumable scans.
 - Use a caller-owned `requests.Session` when connection policy must be configured by the application.
 
 ## Project structure
@@ -71,7 +72,7 @@ for locale in project.locales:
 
 ### Current translations
 
-`translations()` reads one or more exact keys in one batch request. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
+`translations()` reads one or more exact keys in website-sized batches. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
 
 ```python
 values = client.translations(
@@ -102,14 +103,17 @@ matches = client.search_translations(
 
 ### Missing translations and reviews
 
-`missing_keys()` returns keys without a current translation in one locale. `reviews()` returns translations whose English source changed after the translation was last saved, including the previous and current English source. Both queries accept `query` to filter their results.
+`missing()` returns source entries without a current translation in one locale. `reviews()` returns entries whose English source changed after the translation was last saved. Both results include the key, locale, current source, and translation page; reviews additionally include the previous source. Both queries accept `query` to filter their results.
 
 ```python
-missing = client.missing_keys("fr", query="scroll")
+missing = client.missing("fr", query="scroll")
 reviews = client.reviews("fr")
 
+for item in missing:
+    print(item.key, item.source, item.translation_url)
+
 for review in reviews:
-    print(review.key, review.old_source, review.new_source)
+    print(review.key, review.previous_source, review.source)
 ```
 
 ### Translation keys
@@ -150,6 +154,13 @@ for change in recent:
 
 `after` is a website change ID. The client confirms the anchor before yielding a result and raises `RuntimeError` when it is absent. `on_progress` receives the completed page number and current total page count after each request.
 
+`change_pages()` exposes the same stream as immutable `ChangePage` values. `start_page` selects a one-based page. `cursor` is an opaque resume position stored by the caller; the client discards that position and newer records before continuing with older pages.
+
+```python
+page = next(client.change_pages(start_page=1))
+print(page.number, page.total_pages, page.cursor)
+```
+
 ## API reference
 
 ### `NoctaliaClient`
@@ -163,15 +174,17 @@ NoctaliaClient(project, *, timeout, session=None)
 | Member | Result |
 | --- | --- |
 | `slug` | The project identifier passed to the constructor |
+| `translation_url(key, locale)` | Translation page for one key and locale |
 | `project()` | `Project` details and current translation progress |
 | `keys(*, prefix=None)` | `tuple[str, ...]` of complete or prefix-matched keys |
 | `catalog()` | `dict[str, dict[str, str]]` containing the complete current catalog |
 | `translations(key, *keys, locales=None)` | Key-first exact translations |
 | `search_translations(query, *, search_locale, locales=None)` | Key-first translations for text matches |
-| `missing_keys(locale, *, query=None)` | Missing translation keys in one locale |
+| `missing(locale, *, query=None)` | Missing translations with their source text |
 | `reviews(locale, *, query=None)` | Translations needing review in one locale |
 | `changes(key, *keys, locale)` | Newest-first exact-key changes |
 | `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | Lazy project-wide change iterator |
+| `change_pages(*, locale=None, start_page=1, cursor=None)` | Lazy validated pages with an opaque resume cursor |
 | `close()` | Closes an owned HTTP session |
 
 `translations()` and `changes()` require at least one positional key. `translations()` returns requested keys even when their result is empty. `changes()` returns a tuple and requests each selected key from the website. `iter_changes()` never accepts keys and remains lazy until iteration begins.
@@ -198,9 +211,9 @@ Invalid arguments raise `ValueError`. Network failures and responses that do not
 
 Each `Locale` contains `code`, `translation_count`, `missing_count`, `review_count`, and the derived `progress`. Locales without any current translations remain present in the project result.
 
-### `Review`
+### `Missing` and `Review`
 
-Each review contains `key`, `locale`, `old_source`, `new_source`, and `translation_url`. `old_source` is `None` when no previous source text exists. The source difference comes from the website's Needs review query and is distinct from changes to the translation itself.
+Both models contain `key`, `locale`, `source`, and `translation_url`. `Review` additionally contains `previous_source`, which is `None` when no previous source text exists. This source difference is distinct from changes to the translation itself.
 
 ### `Change`
 
@@ -222,6 +235,10 @@ Each change has the following fields:
 
 `ChangeAction` is the literal type `"added" | "modified" | "deleted"`. `SOURCE_LOCALE` is `"en"`.
 
+### `ChangePage`
+
+`ChangePage` contains `number`, `total_pages`, `changes`, and `cursor`. `cursor` corresponds to the final raw website record on the page, including a record that normalizes to no `Change`; callers should treat it only as an opaque resume value.
+
 ## Performance reference
 
 These reference measurements were taken from the public `noctalia` project in August 2026. They describe website requests without a local cache.
@@ -230,9 +247,9 @@ These reference measurements were taken from the public `noctalia` project in Au
 | --- | --- | --- |
 | `project()` | One project page request | Progress for 25 locales, about 23 KB |
 | `catalog()` | One complete export | 42,857 strings, about 2.23 MB, 4.4–4.8 s |
-| `translations()` | One batch request | Two keys and two locales, about 1.3 KB, about 1.4 s |
+| `translations()` | One batch request per 50 keys | Two keys and two locales, about 1.3 KB, about 1.4 s |
 | `search_translations()` | Search pages plus one batch request | 19 Simplified Chinese matches, about 1.7 s |
-| `missing_keys()` | One missing query | All matching keys for the selected locale |
+| `missing()` | One missing query plus batched source queries | Matching entries and their English source text |
 | `reviews()` | One review query | Matching keys and their English source difference |
 | `keys()` | One key-tree page | About 2,474 keys and 147 KB |
 | `changes()` | One request per selected key | Example key, about 1.3 KB and 1.4 s |
