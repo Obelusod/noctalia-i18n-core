@@ -6,26 +6,50 @@ import math
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from itertools import pairwise
+from itertools import batched, pairwise
 from types import TracebackType
 from typing import Self, TypeGuard
 from urllib.parse import quote, urlencode
 
 import requests
 
-from .models import SOURCE_LOCALE, Change, ChangeAction, Locale, Project, Review
+from .models import (
+    SOURCE_LOCALE,
+    Change,
+    ChangeAction,
+    ChangePage,
+    Locale,
+    Missing,
+    Project,
+    Review,
+)
 
 _BASE_URL = "https://i18n.noctalia.dev"
+_TRANSLATION_BATCH_SIZE = 50
 type _JsonValue = (
     None | bool | int | float | str | list[_JsonValue] | dict[str, _JsonValue]
 )
 
 
 @dataclass(frozen=True, slots=True)
-class _ChangePage:
-    records: tuple[tuple[str, datetime, Change | None], ...]
+class _ParsedChangePage:
     number: int
     total_pages: int
+    records: tuple[tuple[str, datetime, Change | None], ...]
+
+    @property
+    def cursor(self) -> str | None:
+        return self.records[-1][0] if self.records else None
+
+    def to_page(
+        self, records: tuple[tuple[str, datetime, Change | None], ...]
+    ) -> ChangePage:
+        return ChangePage(
+            number=self.number,
+            total_pages=self.total_pages,
+            changes=tuple(change for _, _, change in records if change is not None),
+            cursor=self.cursor,
+        )
 
 
 def _is_list(value: object) -> TypeGuard[list[object]]:
@@ -531,13 +555,13 @@ def _parse_reviews(
                 Review(
                     key=key,
                     locale=locale,
-                    old_source=(
+                    previous_source=(
                         _optional_string(
                             _member(record, "enOld", label), f"{label} old source"
                         )
                         or None
                     ),
-                    new_source=_string(
+                    source=_string(
                         _member(record, "enNew", label), f"{label} new source"
                     ),
                     translation_url=_translation_url(project, key, locale),
@@ -602,7 +626,7 @@ def _parse_changes(
 
 def _parse_change_page(
     payload: _JsonValue, project: str, locale_filter: str | None
-) -> _ChangePage:
+) -> _ParsedChangePage:
     resource = "Recent Changes"
     root = _page_object(payload, resource)
     project_data = _validate_project(root, project, resource)
@@ -660,7 +684,11 @@ def _parse_change_page(
         output.append((change_id, occurred_at, change))
     if any(newer[1] < older[1] for newer, older in pairwise(output)):
         raise RuntimeError(f"{resource} is not ordered newest first")
-    return _ChangePage(tuple(output), number, total_pages)
+    return _ParsedChangePage(
+        number=number,
+        total_pages=total_pages,
+        records=tuple(output),
+    )
 
 
 class NoctaliaClient:
@@ -700,6 +728,15 @@ class NoctaliaClient:
         """Return the project identifier."""
 
         return self._project
+
+    def translation_url(self, key: str, locale: str, /) -> str:
+        """Return the website translation page for one key and locale."""
+
+        return _translation_url(
+            self._project,
+            _text(key, "key"),
+            _text(locale, "locale"),
+        )
 
     def project(self) -> Project:
         """Return public project metadata and current progress."""
@@ -764,17 +801,22 @@ class NoctaliaClient:
 
         selected_keys = _keys((key, *keys), "keys")
         selected_locales = _locales(locales, "locales")
-        body = {"keys": list(selected_keys)}
-        if selected_locales is not None:
-            body["locales"] = list(selected_locales)
-        payload = _request_json(
-            self._session,
-            self._batch_url,
-            resource="Translations response",
-            timeout=self._timeout,
-            body=body,
-        )
-        return _parse_translations(payload, selected_keys, selected_locales)
+        output: dict[str, dict[str, str]] = {
+            selected_key: {} for selected_key in selected_keys
+        }
+        for batch in batched(selected_keys, _TRANSLATION_BATCH_SIZE):
+            body = {"keys": list(batch)}
+            if selected_locales is not None:
+                body["locales"] = list(selected_locales)
+            payload = _request_json(
+                self._session,
+                self._batch_url,
+                resource="Translations response",
+                timeout=self._timeout,
+                body=body,
+            )
+            output.update(_parse_translations(payload, batch, selected_locales))
+        return output
 
     def search_translations(
         self,
@@ -817,10 +859,10 @@ class NoctaliaClient:
             return {}
         return self.translations(found[0], *found[1:], locales=selected_locales)
 
-    def missing_keys(
+    def missing(
         self, locale: str, /, *, query: str | None = None
-    ) -> tuple[str, ...]:
-        """Return keys without a current translation in one locale."""
+    ) -> tuple[Missing, ...]:
+        """Return source entries without a translation in one locale."""
 
         locale = _text(locale, "locale")
         parameters: dict[str, int | str] = {"locale": locale}
@@ -833,7 +875,24 @@ class NoctaliaClient:
             timeout=self._timeout,
             parameters=parameters,
         )
-        return _parse_missing(payload)
+        keys = _parse_missing(payload)
+        if not keys:
+            return ()
+        translations = self.translations(keys[0], *keys[1:], locales=(SOURCE_LOCALE,))
+        output: list[Missing] = []
+        for key in keys:
+            source = translations[key].get(SOURCE_LOCALE)
+            if source is None:
+                raise RuntimeError(f"Missing translation {key!r} has no source text")
+            output.append(
+                Missing(
+                    key=key,
+                    locale=locale,
+                    source=source,
+                    translation_url=self.translation_url(key, locale),
+                )
+            )
+        return tuple(output)
 
     def reviews(
         self, locale: str, /, *, query: str | None = None
@@ -905,6 +964,33 @@ class NoctaliaClient:
             on_progress=on_progress,
         )
 
+    def change_pages(
+        self,
+        *,
+        locale: str | None = None,
+        start_page: int = 1,
+        cursor: str | None = None,
+    ) -> Iterator[ChangePage]:
+        """Yield validated pages from the project change stream.
+
+        ``cursor`` identifies a raw website record.  The record and all
+        newer records are discarded, so the first yielded page continues with
+        older records.  This is useful for callers that persist page
+        checkpoints without exposing the website response format.
+        """
+
+        if locale is not None:
+            locale = _text(locale, "locale")
+        if type(start_page) is not int or start_page < 1:
+            raise ValueError("start_page must be a positive integer")
+        if cursor is not None:
+            cursor = _text(cursor, "cursor")
+        return self._change_pages(
+            locale=locale,
+            start_page=start_page,
+            cursor=cursor,
+        )
+
     def close(self) -> None:
         """Close the HTTP session when it belongs to this client."""
 
@@ -931,45 +1017,77 @@ class NoctaliaClient:
         after: str | None,
         on_progress: Callable[[int, int], None] | None,
     ) -> Iterator[Change]:
-        page = 1
         pending: list[Change] = []
-        seen: set[str] = set()
         anchor_found = after is None
-        while True:
-            result = self._fetch_change_page(page, locale)
+        for result in self.change_pages(locale=locale):
             if on_progress is not None:
                 on_progress(result.number, result.total_pages)
-            for change_id, occurred_at, change in result.records:
-                if change_id in seen:
-                    continue
-                seen.add(change_id)
+            for change in result.changes:
                 if after is not None and not anchor_found:
-                    if change_id == after:
+                    if change.id == after:
                         anchor_found = True
                         break
-                    if change is not None and (
-                        (since is None or occurred_at >= since)
-                        and (until is None or occurred_at <= until)
+                    if (since is None or change.occurred_at >= since) and (
+                        until is None or change.occurred_at <= until
                     ):
                         pending.append(change)
                     continue
-                if since is not None and occurred_at < since:
+                if since is not None and change.occurred_at < since:
                     return
-                if change is None:
-                    continue
-                if until is None or occurred_at <= until:
+                if until is None or change.occurred_at <= until:
                     if after is not None:
                         pending.append(change)
                     else:
                         yield change
+            if after is not None and not anchor_found and result.cursor == after:
+                anchor_found = True
             if after is not None and anchor_found:
                 yield from pending
                 return
+        if after is not None and not anchor_found:
+            raise RuntimeError(f"Change {after!r} was not found in the project stream")
+
+    def _change_pages(
+        self,
+        *,
+        locale: str | None,
+        start_page: int,
+        cursor: str | None,
+    ) -> Iterator[ChangePage]:
+        page = start_page
+        seen: set[str] = set()
+        previous_time: datetime | None = None
+        anchor_found = cursor is None
+        while True:
+            result = self._fetch_change_page(page, locale)
+            if result.total_pages == 0 or result.number > result.total_pages:
+                break
+            for change_id, occurred_at, _ in result.records:
+                if change_id in seen:
+                    raise RuntimeError(
+                        f"Recent Changes contains duplicate ID {change_id!r}"
+                    )
+                if previous_time is not None and occurred_at > previous_time:
+                    raise RuntimeError("Recent Changes is not ordered newest first")
+                seen.add(change_id)
+                previous_time = occurred_at
+            records = result.records
+            if cursor is not None and not anchor_found:
+                for index, (change_id, _, _) in enumerate(records):
+                    if change_id == cursor:
+                        anchor_found = True
+                        records = records[index + 1 :]
+                        break
+                else:
+                    records = ()
+            yield result.to_page(records)
             if result.number >= result.total_pages:
                 break
             page = result.number + 1
-        if after is not None and not anchor_found:
-            raise RuntimeError(f"Change {after!r} was not found in the project stream")
+        if cursor is not None and not anchor_found:
+            raise RuntimeError(
+                f"Change cursor {cursor!r} was not found in the project stream"
+            )
 
     def _fetch_changes(self, key: str, locale: str) -> tuple[Change, ...]:
         payload = _request_json(
@@ -981,7 +1099,7 @@ class NoctaliaClient:
         )
         return _parse_changes(payload, self._project, key, locale)
 
-    def _fetch_change_page(self, page: int, locale: str | None) -> _ChangePage:
+    def _fetch_change_page(self, page: int, locale: str | None) -> _ParsedChangePage:
         parameters: dict[str, int | str] = {"changesPage": page}
         if locale is not None:
             parameters["changesLocale"] = locale

@@ -10,7 +10,9 @@ def main() -> None:
     required = {
         "Change",
         "ChangeAction",
+        "ChangePage",
         "Locale",
+        "Missing",
         "NoctaliaClient",
         "Project",
         "Review",
@@ -23,14 +25,16 @@ def main() -> None:
         raise RuntimeError(f"The public package API is incomplete: {missing!r}")
     methods = (
         "catalog",
+        "change_pages",
         "changes",
         "close",
         "iter_changes",
         "keys",
-        "missing_keys",
+        "missing",
         "project",
         "reviews",
         "search_translations",
+        "translation_url",
         "translations",
     )
     missing_methods = tuple(
