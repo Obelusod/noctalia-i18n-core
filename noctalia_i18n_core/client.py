@@ -507,8 +507,10 @@ def _parse_search_page(
     returned_locale = _string(
         _member(root, "initialLocale", resource), f"{resource} locale"
     )
-    if returned_query != query or returned_locale != search_locale:
-        raise RuntimeError("Translation search returned unexpected filters")
+    if returned_query != query:
+        raise RuntimeError("Translation search did not apply the requested query")
+    if returned_locale != search_locale:
+        raise RuntimeError(f"Translation search did not apply locale {search_locale!r}")
     page = _integer(_member(root, "page", resource), f"{resource} page", minimum=1)
     total_pages = _integer(
         _member(root, "totalPages", resource),
@@ -637,7 +639,9 @@ def _parse_change_page(
     if not isinstance(returned_locale, str):
         raise RuntimeError(f"{resource} locale filter is not a string")
     if returned_locale != (locale_filter or ""):
-        raise RuntimeError("Recent Changes returned an unexpected locale filter")
+        if locale_filter is None:
+            raise RuntimeError("Recent Changes unexpectedly applied a locale filter")
+        raise RuntimeError(f"Recent Changes did not apply locale {locale_filter!r}")
     number = _integer(
         _member(root, "changesPage", resource), f"{resource} page", minimum=1
     )
