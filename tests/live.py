@@ -11,7 +11,7 @@ import requests
 
 from noctalia_i18n_core import SOURCE_LOCALE, NoctaliaClient
 
-PROJECTS_URL = "https://i18n.noctalia.dev/projects"
+_PROJECTS_URL = "https://i18n.noctalia.dev/projects"
 
 
 class _ProjectLinks(HTMLParser):
@@ -33,7 +33,7 @@ class _ProjectLinks(HTMLParser):
 
 
 def _projects() -> tuple[str, ...]:
-    response = requests.get(PROJECTS_URL, timeout=30)
+    response = requests.get(_PROJECTS_URL, timeout=30)
     response.raise_for_status()
     parser = _ProjectLinks()
     parser.feed(response.text)
@@ -102,7 +102,3 @@ class LiveTests(unittest.TestCase):
             for future in as_completed(pending):
                 with self.subTest(project=pending[future]):
                     future.result()
-
-
-if __name__ == "__main__":
-    unittest.main()

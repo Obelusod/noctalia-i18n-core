@@ -584,7 +584,3 @@ class ClientTests(unittest.TestCase):
             client = NoctaliaClient("noctalia", timeout=10)
         client.close()
         self.assertTrue(owned.closed_by_client)
-
-
-if __name__ == "__main__":
-    unittest.main()
