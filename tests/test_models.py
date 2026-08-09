@@ -97,7 +97,3 @@ class ProjectTests(unittest.TestCase):
                 key_count=11,
                 locales=(locale,),
             )
-
-
-if __name__ == "__main__":
-    unittest.main()
