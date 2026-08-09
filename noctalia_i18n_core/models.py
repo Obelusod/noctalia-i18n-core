@@ -15,15 +15,15 @@ def _text(value: object, label: str) -> None:
         raise ValueError(f"{label} must be a non-empty string")
 
 
+def _count(value: object, label: str) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+
+
 def _utc(value: object) -> datetime:
     if not isinstance(value, datetime) or value.utcoffset() is None:
         raise ValueError("Change occurred_at must include a timezone")
     return value.astimezone(UTC)
-
-
-def _count(value: object, label: str) -> None:
-    if type(value) is not int or value < 0:
-        raise ValueError(f"{label} must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -117,25 +117,44 @@ class Project:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Review:
-    """One translation that needs review after its source changed."""
+class Missing:
+    """One source entry without a translation in the selected locale."""
 
     key: str
     locale: str
-    old_source: str | None
-    new_source: str
+    source: str
     translation_url: str
 
     def __post_init__(self) -> None:
         for name, value in (
             ("key", self.key),
             ("locale", self.locale),
-            ("new_source", self.new_source),
+            ("source", self.source),
+            ("translation_url", self.translation_url),
+        ):
+            _text(value, f"Missing {name}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Review:
+    """One translation whose source changed after it was saved."""
+
+    key: str
+    locale: str
+    source: str
+    previous_source: str | None
+    translation_url: str
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("key", self.key),
+            ("locale", self.locale),
+            ("source", self.source),
             ("translation_url", self.translation_url),
         ):
             _text(value, f"Review {name}")
-        if self.old_source is not None:
-            _text(self.old_source, "Review old_source")
+        if self.previous_source is not None:
+            _text(self.previous_source, "Review previous_source")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -187,3 +206,30 @@ class Change:
         ):
             if value is not None:
                 _text(value, f"Change {name}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChangePage:
+    """One validated page from the project change stream."""
+
+    number: int
+    total_pages: int
+    changes: tuple[Change, ...]
+    cursor: str | None
+
+    def __post_init__(self) -> None:
+        _count(self.number, "Change page number")
+        if self.number == 0:
+            raise ValueError("Change page number must be positive")
+        _count(self.total_pages, "Change page total_pages")
+        if self.total_pages == 0:
+            raise ValueError("Change page total_pages must be positive")
+        if self.number > self.total_pages:
+            raise ValueError("Change page number exceeds total_pages")
+        if type(self.changes) is not tuple:
+            raise ValueError("Change page changes must be a tuple")
+        identifiers = tuple(change.id for change in self.changes)
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Change page contains duplicate changes")
+        if self.cursor is not None:
+            _text(self.cursor, "Change page cursor")

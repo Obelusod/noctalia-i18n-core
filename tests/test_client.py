@@ -91,7 +91,7 @@ class ClientTests(unittest.TestCase):
                 {DESCRIPTION: {"en": DESCRIPTION_EN, "zh-Hans": DESCRIPTION_ZH}},
             )
 
-    def test_translations_keep_missing_keys_and_locale_order(self) -> None:
+    def test_translations_preserve_empty_results_and_locale_order(self) -> None:
         session = Session(
             post_responses=(
                 {
@@ -124,6 +124,31 @@ class ClientTests(unittest.TestCase):
                 "keys": [DESCRIPTION, LABEL],
                 "locales": ["zh-Hans", "en"],
             },
+        )
+
+    def test_translations_follow_the_website_batch_size(self) -> None:
+        keys = tuple(f"settings.example.option-{index}" for index in range(51))
+
+        def response(selected: tuple[str, ...]) -> dict[str, object]:
+            return {
+                "translations": {
+                    key: {"en": translation_record(key, "en", key)} for key in selected
+                }
+            }
+
+        session = Session(
+            post_responses=(response(keys[:50]), response(keys[50:])),
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            result = client.translations(keys[0], *keys[1:], locales=("en",))
+
+        self.assertEqual(tuple(result), keys)
+        self.assertEqual(
+            [call[1]["json"] for call in session.post_calls],
+            [
+                {"keys": list(keys[:50]), "locales": ["en"]},
+                {"keys": list(keys[50:]), "locales": ["en"]},
+            ],
         )
 
     def test_search_reads_every_page_then_fetches_values_once(self) -> None:
@@ -221,7 +246,7 @@ class ClientTests(unittest.TestCase):
                 (DESCRIPTION, LABEL),
             )
 
-    def test_missing_keys_and_reviews_preserve_website_information(self) -> None:
+    def test_missing_and_reviews_preserve_website_information(self) -> None:
         session = Session(
             get_responses=(
                 {"keys": [DESCRIPTION, LABEL], "count": 2},
@@ -240,20 +265,40 @@ class ClientTests(unittest.TestCase):
                     ],
                     "count": 2,
                 },
-            )
+            ),
+            post_responses=(
+                {
+                    "translations": {
+                        DESCRIPTION: {
+                            "en": translation_record(DESCRIPTION, "en", DESCRIPTION_EN)
+                        },
+                        LABEL: {"en": translation_record(LABEL, "en", LABEL_EN)},
+                    }
+                },
+            ),
         )
         with NoctaliaClient("noctalia", timeout=10, session=session) as client:
-            self.assertEqual(
-                client.missing_keys("fr", query="scroll"), (DESCRIPTION, LABEL)
-            )
+            missing = client.missing("fr", query="scroll")
             reviews = client.reviews("fr")
 
+        self.assertEqual(
+            [(item.key, item.locale, item.source) for item in missing],
+            [
+                (DESCRIPTION, "fr", DESCRIPTION_EN),
+                (LABEL, "fr", LABEL_EN),
+            ],
+        )
+        self.assertIn("locale=fr", missing[0].translation_url)
         self.assertEqual(reviews[0].locale, "fr")
         self.assertEqual(
-            reviews[0].old_source,
+            reviews[0].previous_source,
             "Choose dark, light, or auto based on time of day",
         )
-        self.assertIsNone(reviews[1].old_source)
+        self.assertEqual(
+            reviews[0].source,
+            "Choose Dark, Light, or Auto based on time of day",
+        )
+        self.assertIsNone(reviews[1].previous_source)
         self.assertIn("locale=fr", reviews[0].translation_url)
 
     def test_changes_merge_keys_newest_first(self) -> None:
@@ -317,6 +362,144 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(StopIteration):
             next(iterator)
         self.assertEqual(len(session.get_calls), 2)
+
+    def test_change_pages_start_resume_and_raw_boundary(self) -> None:
+        session = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "3",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        3_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    (
+                        "2",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        2_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    page=1,
+                    total_pages=2,
+                ),
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        None,
+                        1_000,
+                        None,
+                        PREVIOUS_DESCRIPTION_ZH,
+                    ),
+                    page=2,
+                    total_pages=2,
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            pages = tuple(client.change_pages(cursor="2"))
+        self.assertEqual([page.number for page in pages], [1, 2])
+        self.assertEqual([change.id for change in pages[0].changes], [])
+        self.assertEqual([change.id for change in pages[1].changes], ["1"])
+        self.assertEqual([page.cursor for page in pages], ["2", "1"])
+
+        empty = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "empty",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        None,
+                        1_000,
+                        "",
+                        "",
+                    ),
+                    page=1,
+                    total_pages=1,
+                    locale="zh-Hans",
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=empty) as client:
+            page = next(client.change_pages(locale="zh-Hans"))
+        self.assertEqual(page.changes, ())
+        self.assertEqual(page.cursor, "empty")
+        self.assertEqual(
+            empty.get_calls[0][1]["params"],
+            {"changesPage": 1, "changesLocale": "zh-Hans"},
+        )
+
+    def test_change_pages_validate_start_anchor_and_duplicate_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            NoctaliaClient("noctalia", timeout=10).change_pages(start_page=0)
+
+        missing = Session(get_responses=(changes_page(page=1, total_pages=1),))
+        with NoctaliaClient("noctalia", timeout=10, session=missing) as client:
+            with self.assertRaises(RuntimeError):
+                tuple(client.change_pages(cursor="missing"))
+
+        duplicate = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        2_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    page=1,
+                    total_pages=2,
+                ),
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        1_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    page=2,
+                    total_pages=2,
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=duplicate) as client:
+            with self.assertRaises(RuntimeError):
+                tuple(client.change_pages())
+
+        start = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        None,
+                        1_000,
+                        None,
+                        PREVIOUS_DESCRIPTION_ZH,
+                    ),
+                    page=2,
+                    total_pages=2,
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=start) as client:
+            pages = tuple(client.change_pages(start_page=2))
+        self.assertEqual([page.number for page in pages], [2])
 
     def test_change_anchor_is_confirmed_before_results_are_returned(self) -> None:
         session = Session(

@@ -1,4 +1,4 @@
-"""Tests for the public translation change value."""
+"""Public model behavior tests."""
 
 from __future__ import annotations
 

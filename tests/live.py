@@ -75,7 +75,7 @@ class LiveTests(unittest.TestCase):
                 project.locales, key=lambda locale: locale.review_count
             )
             self.assertEqual(
-                len(client.missing_keys(missing_locale.code)),
+                len(client.missing(missing_locale.code)),
                 missing_locale.missing_count,
             )
             self.assertEqual(
