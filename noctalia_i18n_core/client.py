@@ -1090,16 +1090,16 @@ class NoctaliaClient:
             result = self._fetch_change_page(page, locale)
             if result.total_pages == 0 or result.number > result.total_pages:
                 break
-            for change_id, occurred_at, _ in result.records:
+            unique_records: list[tuple[str, datetime, Change | None]] = []
+            for change_id, occurred_at, change in result.records:
                 if change_id in seen:
-                    raise RuntimeError(
-                        f"Recent Changes contains duplicate ID {change_id!r}"
-                    )
+                    continue
                 if previous_time is not None and occurred_at > previous_time:
                     raise RuntimeError("Recent Changes is not ordered newest first")
                 seen.add(change_id)
                 previous_time = occurred_at
-            records = result.records
+                unique_records.append((change_id, occurred_at, change))
+            records = tuple(unique_records)
             if cursor is not None and not anchor_found:
                 for index, (change_id, _, _) in enumerate(records):
                     if change_id == cursor:

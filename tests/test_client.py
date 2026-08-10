@@ -489,7 +489,7 @@ class ClientTests(unittest.TestCase):
             {"changesPage": 1, "changesLocale": "zh-Hans"},
         )
 
-    def test_change_pages_validate_start_anchor_and_duplicate_ids(self) -> None:
+    def test_change_pages_validate_start_anchor_and_skip_page_overlap(self) -> None:
         with self.assertRaises(ValueError):
             NoctaliaClient("noctalia", timeout=10).change_pages(start_page=0)
 
@@ -523,13 +523,55 @@ class ClientTests(unittest.TestCase):
                         PREVIOUS_DESCRIPTION_ZH,
                         DESCRIPTION_ZH,
                     ),
+                    (
+                        "0",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        500,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
                     page=2,
                     total_pages=2,
                 ),
             )
         )
         with NoctaliaClient("noctalia", timeout=10, session=duplicate) as client:
-            with self.assertRaises(RuntimeError):
+            pages = tuple(client.change_pages())
+        self.assertEqual(
+            [[change.id for change in page.changes] for page in pages],
+            [["1"], ["0"]],
+        )
+
+        same_page = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        2_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        1_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    page=1,
+                    total_pages=1,
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=same_page) as client:
+            with self.assertRaisesRegex(RuntimeError, "duplicate ID"):
                 tuple(client.change_pages())
 
         start = Session(
