@@ -12,6 +12,8 @@ from typing import Self, TypeGuard
 from urllib.parse import quote, urlencode
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from .models import (
     SOURCE_LOCALE,
@@ -25,6 +27,8 @@ from .models import (
 )
 
 _BASE_URL = "https://i18n.noctalia.dev"
+_RETRYABLE_METHODS = frozenset({"GET", "POST"})
+_RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _TRANSLATION_BATCH_SIZE = 50
 type _JsonValue = (
     None | bool | int | float | str | list[_JsonValue] | dict[str, _JsonValue]
@@ -222,6 +226,22 @@ def _change(
         raise RuntimeError(f"{label} is invalid: {exc}") from exc
 
 
+def _create_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        max_retries=Retry(
+            total=3,
+            allowed_methods=_RETRYABLE_METHODS,
+            status_forcelist=_RETRYABLE_STATUSES,
+            backoff_factor=0.5,
+            raise_on_status=False,
+        )
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
 def _request_json(
     session: requests.Session,
     url: str,
@@ -252,11 +272,14 @@ def _request_json(
         raise RuntimeError(f"{resource} is not valid JSON") from exc
     except requests.RequestException as exc:
         response = exc.response
-        detail = (
-            f"HTTP {response.status_code}"
-            if response is not None
-            else "network failure"
-        )
+        if response is not None:
+            detail = f"HTTP {response.status_code}"
+        elif isinstance(exc, requests.Timeout):
+            detail = "request timed out"
+        elif isinstance(exc, requests.ConnectionError):
+            detail = "connection failed"
+        else:
+            detail = "network failure"
         raise RuntimeError(f"Cannot retrieve {resource}: {detail}") from exc
     try:
         return _normalize(raw, resource)
@@ -725,7 +748,7 @@ class NoctaliaClient:
         self._reviews_url = f"{api}/outdated"
         self._changes_url = f"{api}/translations/history"
         self._owns_session = session is None
-        self._session = session if session is not None else requests.Session()
+        self._session = session if session is not None else _create_session()
 
     @property
     def slug(self) -> str:

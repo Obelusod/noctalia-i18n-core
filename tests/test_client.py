@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from typing import ClassVar, override
 from unittest.mock import patch
 
 from noctalia_i18n_core import NoctaliaClient
@@ -25,6 +28,27 @@ LABEL_ZH = "滚动触发模式"
 PREVIOUS_DESCRIPTION_ZH = (
     "选择滚动操作是遵循命令语义、每次手势仅运行一次，还是针对每个滚动步长重复运行"
 )
+
+
+class _RetryHandler(BaseHTTPRequestHandler):
+    attempts: ClassVar[int] = 0
+
+    def do_GET(self) -> None:
+        type(self).attempts += 1
+        if self.attempts == 1:
+            self.send_response(503)
+            self.end_headers()
+            return
+        payload = b'{"en":{"test":{"value":"Value"}}}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    @override
+    def log_message(self, format: str, *args: object) -> None:
+        pass
 
 
 class ClientTests(unittest.TestCase):
@@ -574,10 +598,31 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 client.translations(DESCRIPTION)
 
+    def test_owned_session_retries_a_temporary_server_failure(self) -> None:
+        _RetryHandler.attempts = 0
+        with ThreadingHTTPServer(("127.0.0.1", 0), _RetryHandler) as server:
+            thread = Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                with patch(
+                    "noctalia_i18n_core.client._BASE_URL",
+                    f"http://127.0.0.1:{server.server_port}",
+                ):
+                    with NoctaliaClient("noctalia", timeout=10) as client:
+                        catalog = client.catalog()
+            finally:
+                server.shutdown()
+                thread.join()
+
+        self.assertEqual(catalog, {"test.value": {"en": "Value"}})
+        self.assertEqual(_RetryHandler.attempts, 2)
+
     def test_session_ownership_is_respected(self) -> None:
         external = Session()
+        adapter = external.get_adapter("https://")
         NoctaliaClient("noctalia", timeout=10, session=external).close()
         self.assertFalse(external.closed_by_client)
+        self.assertIs(external.get_adapter("https://"), adapter)
 
         owned = Session()
         with patch("noctalia_i18n_core.client.requests.Session", return_value=owned):

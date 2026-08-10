@@ -13,6 +13,7 @@ Noctalia i18n Core 是一个只读 Python 客户端，用于读取 [Noctalia Tra
 - 读取指定 locale 中一个或多个键的完整变更记录。
 - 按 locale、时间和锚点边界惰性读取项目级变更流。
 - 读取经过验证且带持久化游标的变更页，支持可恢复的长时间扫描。
+- 重试临时连接故障、超时、限流和服务端错误。
 - 在应用需要配置连接策略时使用调用方管理的 `requests.Session`。
 
 ## 项目结构
@@ -51,7 +52,7 @@ with NoctaliaClient("noctalia", timeout=30) as client:
     print(changes[0].occurred_at if changes else "暂无变更")
 ```
 
-客户端只关闭由自身创建的 session。需要由应用管理代理或重试等连接设置时，应传入已配置的 `requests.Session`。
+客户端会重试临时故障，并且只关闭由自身创建的 session。需要由应用管理代理或重试策略时，应传入已配置的 `requests.Session`；调用方管理的 session 不会被修改。
 
 ### 项目信息与翻译进度
 
@@ -169,7 +170,7 @@ print(page.number, page.total_pages, page.cursor)
 NoctaliaClient(project, *, timeout, session=None)
 ```
 
-`project` 是网站项目标识。`timeout` 是正的有限秒数。`session` 可以是调用方管理的 `requests.Session`；只有客户端自行创建 session 时才会负责关闭它。
+`project` 是网站项目标识。`timeout` 是每次尝试所使用的正有限秒数。默认情况下，临时连接故障、超时、限流和服务端错误会按退避策略重试三次。`session` 可以是调用方管理的 `requests.Session`；客户端会保留其传输策略，也不会将其关闭。
 
 | 成员 | 返回值 |
 | --- | --- |
@@ -189,7 +190,7 @@ NoctaliaClient(project, *, timeout, session=None)
 
 `translations()` 和 `changes()` 至少需要一个位置键参数。`translations()` 即使结果为空也会返回请求的键。`changes()` 返回元组，并为每个请求键访问网站。`iter_changes()` 不接受键参数，只有开始迭代时才会发起请求。
 
-无效参数抛出 `ValueError`；网络故障以及不符合网站契约的响应抛出 `RuntimeError`。
+无效参数抛出 `ValueError`；重试后仍未恢复的网络故障以及不符合网站契约的响应抛出 `RuntimeError`。
 
 ### `Project` 与 `Locale`
 
