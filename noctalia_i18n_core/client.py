@@ -177,13 +177,6 @@ def _change_values(
     return "modified", old_value, new_value
 
 
-def _github_urls(login: str | None) -> tuple[str | None, str | None]:
-    if login is None:
-        return None, None
-    path = quote(login, safe="")
-    return f"https://github.com/{path}", f"https://github.com/{path}.png"
-
-
 def _translation_url(project: str, key: str, locale: str) -> str:
     return (
         f"{_BASE_URL}/projects/{quote(project, safe='')}/translate?"
@@ -197,7 +190,7 @@ def _change(
     change_id: str,
     key: str,
     locale: str,
-    actor_login: str | None,
+    actor: str,
     old_value: str | None,
     new_value: str | None,
     occurred_at: datetime,
@@ -207,20 +200,17 @@ def _change(
     if values is None:
         return None
     action, old_value, new_value = values
-    actor_url, actor_avatar_url = _github_urls(actor_login)
     try:
         return Change(
             id=change_id,
             key=key,
             locale=locale,
             action=action,
+            actor=actor,
             old_value=old_value,
             new_value=new_value,
             occurred_at=occurred_at,
             translation_url=_translation_url(project, key, locale),
-            actor_login=actor_login,
-            actor_url=actor_url,
-            actor_avatar_url=actor_avatar_url,
         )
     except ValueError as exc:
         raise RuntimeError(f"{label} is invalid: {exc}") from exc
@@ -564,38 +554,27 @@ def _parse_missing(payload: _JsonValue) -> tuple[str, ...]:
     return keys
 
 
-def _parse_reviews(
-    payload: _JsonValue, project: str, locale: str
-) -> tuple[Review, ...]:
+def _parse_review_sources(
+    payload: _JsonValue,
+) -> tuple[tuple[str, str | None, str], ...]:
     resource = "Translations needing review"
     root = _object(payload, resource)
     values = _array(_member(root, "items", resource), f"{resource} items")
-    output: list[Review] = []
+    output: list[tuple[str, str | None, str]] = []
     for index, value in enumerate(values):
         label = f"{resource} item {index}"
         record = _object(value, label)
         key = _string(_member(record, "key", label), f"{label} key")
-        try:
-            output.append(
-                Review(
-                    key=key,
-                    locale=locale,
-                    previous_source=(
-                        _optional_string(
-                            _member(record, "enOld", label), f"{label} old source"
-                        )
-                        or None
-                    ),
-                    source=_string(
-                        _member(record, "enNew", label), f"{label} new source"
-                    ),
-                    translation_url=_translation_url(project, key, locale),
-                )
+        output.append(
+            (
+                key,
+                _optional_string(_member(record, "enOld", label), f"{label} old source")
+                or None,
+                _string(_member(record, "enNew", label), f"{label} new source"),
             )
-        except ValueError as exc:
-            raise RuntimeError(f"{label} is invalid: {exc}") from exc
+        )
     count = _integer(_member(root, "count", resource), f"{resource} count", minimum=0)
-    keys = tuple(review.key for review in output)
+    keys = tuple(item[0] for item in output)
     if len(output) != count or len(keys) != len(set(keys)):
         raise RuntimeError(f"{resource} count does not match its unique items")
     return tuple(output)
@@ -627,11 +606,11 @@ def _parse_changes(
             change_id=change_id,
             key=record_key,
             locale=record_locale,
-            actor_login=(
+            actor=(
                 _optional_string(
                     _member(record, "created_by_login", label), f"{label} actor"
                 )
-                or None
+                or "API"
             ),
             old_value=_optional_string(
                 _member(record, "text", label), f"{label} old value"
@@ -698,7 +677,7 @@ def _parse_change_page(
             change_id=change_id,
             key=key,
             locale=record_locale,
-            actor_login=actor or None,
+            actor=actor or "API",
             old_value=_optional_string(
                 _member(record, "text", label), f"{label} old value"
             ),
@@ -937,7 +916,29 @@ class NoctaliaClient:
             timeout=self._timeout,
             parameters=parameters,
         )
-        return _parse_reviews(payload, self._project, locale)
+        sources = _parse_review_sources(payload)
+        if not sources:
+            return ()
+        keys = tuple(item[0] for item in sources)
+        translations = self.translations(*keys, locales=(locale,))
+        output: list[Review] = []
+        for key, old_source, new_source in sources:
+            translation = translations[key].get(locale)
+            if translation is None:
+                raise RuntimeError(
+                    f"Translation needing review {key!r} has no {locale!r} translation"
+                )
+            output.append(
+                Review(
+                    key=key,
+                    locale=locale,
+                    old_source=old_source,
+                    new_source=new_source,
+                    translation=translation,
+                    translation_url=self.translation_url(key, locale),
+                )
+            )
+        return tuple(output)
 
     def changes(
         self,

@@ -104,7 +104,7 @@ matches = client.search_translations(
 
 ### 缺失与待复核译文
 
-`missing()` 返回指定 locale 中缺少译文的原文条目，`reviews()` 返回译文保存后英文原文发生变化的条目。两者都包含键、locale、当前原文及翻译页面；待复核条目还包含此前的原文。两种查询均可使用 `query` 筛选结果。
+`missing()` 返回指定 locale 中缺少译文的原文条目。`reviews()` 返回译文保存后英文原文发生变化的条目，并包含变更前后的原文与当前译文。两种查询均可使用 `query` 筛选结果。
 
 ```python
 missing = client.missing("fr", query="scroll")
@@ -114,7 +114,12 @@ for item in missing:
     print(item.key, item.source, item.translation_url)
 
 for review in reviews:
-    print(review.key, review.previous_source, review.source)
+    print(
+        review.key,
+        review.old_source,
+        review.new_source,
+        review.translation,
+    )
 ```
 
 ### 翻译键
@@ -214,7 +219,7 @@ NoctaliaClient(project, *, timeout, session=None)
 
 ### `Missing` 与 `Review`
 
-两种模型都包含 `key`、`locale`、`source` 和 `translation_url`。`Review` 还包含 `previous_source`；不存在此前原文时为 `None`。这里的原文差异不代表译文本身的变更记录。
+`Missing` 包含 `key`、`locale`、`source` 和 `translation_url`。`Review` 包含 `key`、`locale`、`old_source`、`new_source`、`translation` 和 `translation_url`；网站没有此前原文时，`old_source` 为 `None`。这里的原文差异不代表译文本身的变更记录。
 
 ### `Change`
 
@@ -226,13 +231,11 @@ NoctaliaClient(project, *, timeout, session=None)
 | `key` | 翻译键 |
 | `locale` | 发生变更的 locale |
 | `action` | `added`、`modified` 或 `deleted` |
+| `actor` | 贡献者登录名；自动变更为 `API` |
 | `old_value` | 变更前文案；新增时为 `None` |
 | `new_value` | 变更后文案；删除时为 `None` |
 | `occurred_at` | 带 UTC 时区的 `datetime` |
 | `translation_url` | 对应键和 locale 的翻译页面 |
-| `actor_login` | 贡献者登录名；自动变更为 `None` |
-| `actor_url` | 可用时的贡献者资料链接 |
-| `actor_avatar_url` | 可用时的贡献者头像链接 |
 
 `ChangeAction` 是字面量类型 `"added" | "modified" | "deleted"`。`SOURCE_LOCALE` 的值为 `"en"`。
 
@@ -251,7 +254,7 @@ NoctaliaClient(project, *, timeout, session=None)
 | `translations()` | 每 50 个键一次批量请求 | 两个键、两个 locale，约 1.3 KB，约 1.4 秒 |
 | `search_translations()` | 搜索页面及一次批量请求 | 简体中文匹配 19 个，约 1.7 秒 |
 | `missing()` | 一次缺失查询及分批原文查询 | 返回匹配条目及其英文原文 |
-| `reviews()` | 一次待复核查询 | 返回匹配键及其英文原文差异 |
+| `reviews()` | 一次待复核查询及分批译文查询 | 返回匹配键、英文原文差异与当前译文 |
 | `keys()` | 一次键树请求 | 约 2,474 个键，147 KB |
 | `changes()` | 每个请求键一次请求 | 示例键约 1.3 KB，约 1.4 秒 |
 | `iter_changes()` | 读取变更页直到边界 | 取决于请求范围 |
