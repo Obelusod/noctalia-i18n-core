@@ -13,6 +13,7 @@ Noctalia i18n Core is a read-only Python client for project progress, current tr
 - Read complete changes for selected keys in one locale.
 - Lazily read the project-wide change stream with locale, time, and anchor boundaries.
 - Read validated change pages with a durable cursor for resumable scans.
+- Retry temporary connection, timeout, rate-limit, and server failures.
 - Use a caller-owned `requests.Session` when connection policy must be configured by the application.
 
 ## Project structure
@@ -51,7 +52,7 @@ with NoctaliaClient("noctalia", timeout=30) as client:
     print(changes[0].occurred_at if changes else "No changes")
 ```
 
-The client closes only the session it creates. Pass a configured `requests.Session` when the application owns connection settings such as proxies or retries.
+The client retries temporary failures and closes the session it creates. Pass a configured `requests.Session` when the application owns connection settings such as proxies or retry policy; caller-owned sessions are used without modification.
 
 ### Project details and progress
 
@@ -169,7 +170,7 @@ print(page.number, page.total_pages, page.cursor)
 NoctaliaClient(project, *, timeout, session=None)
 ```
 
-`project` is the website project identifier. `timeout` is a positive finite number of seconds. `session` may be a caller-owned `requests.Session`; the client closes it only when it created the session itself.
+`project` is the website project identifier. `timeout` is a positive finite number of seconds applied to each attempt. By default, temporary connection, timeout, rate-limit, and server failures are retried three times with backoff. `session` may be a caller-owned `requests.Session`; its transport policy is preserved and the client does not close it.
 
 | Member | Result |
 | --- | --- |
@@ -189,7 +190,7 @@ NoctaliaClient(project, *, timeout, session=None)
 
 `translations()` and `changes()` require at least one positional key. `translations()` returns requested keys even when their result is empty. `changes()` returns a tuple and requests each selected key from the website. `iter_changes()` never accepts keys and remains lazy until iteration begins.
 
-Invalid arguments raise `ValueError`. Network failures and responses that do not match the website contract raise `RuntimeError`.
+Invalid arguments raise `ValueError`. Network failures that remain after retries and responses that do not match the website contract raise `RuntimeError`.
 
 ### `Project` and `Locale`
 
