@@ -141,20 +141,22 @@ class Review:
 
     key: str
     locale: str
-    source: str
-    previous_source: str | None
+    old_source: str | None
+    new_source: str
+    translation: str
     translation_url: str
 
     def __post_init__(self) -> None:
         for name, value in (
             ("key", self.key),
             ("locale", self.locale),
-            ("source", self.source),
+            ("new_source", self.new_source),
+            ("translation", self.translation),
             ("translation_url", self.translation_url),
         ):
             _text(value, f"Review {name}")
-        if self.previous_source is not None:
-            _text(self.previous_source, "Review previous_source")
+        if self.old_source is not None:
+            _text(self.old_source, "Review old_source")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -165,13 +167,11 @@ class Change:
     key: str
     locale: str
     action: ChangeAction
+    actor: str
     old_value: str | None
     new_value: str | None
     occurred_at: datetime
     translation_url: str
-    actor_login: str | None
-    actor_url: str | None = None
-    actor_avatar_url: str | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -196,16 +196,9 @@ class Change:
         }
         if not valid[self.action]:
             raise ValueError(f"Change values do not match action {self.action!r}")
+        _text(self.actor, "Change actor")
         object.__setattr__(self, "occurred_at", _utc(self.occurred_at))
         _text(self.translation_url, "Change translation_url")
-        if self.actor_login is not None:
-            _text(self.actor_login, "Change actor_login")
-        for name, value in (
-            ("actor_url", self.actor_url),
-            ("actor_avatar_url", self.actor_avatar_url),
-        ):
-            if value is not None:
-                _text(value, f"Change {name}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

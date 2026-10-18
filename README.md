@@ -104,7 +104,7 @@ matches = client.search_translations(
 
 ### Missing translations and reviews
 
-`missing()` returns source entries without a current translation in one locale. `reviews()` returns entries whose English source changed after the translation was last saved. Both results include the key, locale, current source, and translation page; reviews additionally include the previous source. Both queries accept `query` to filter their results.
+`missing()` returns source entries without a current translation in one locale. `reviews()` returns entries whose English source changed after the translation was last saved, including the old and new source text and the current translation. Both queries accept `query` to filter their results.
 
 ```python
 missing = client.missing("fr", query="scroll")
@@ -114,7 +114,12 @@ for item in missing:
     print(item.key, item.source, item.translation_url)
 
 for review in reviews:
-    print(review.key, review.previous_source, review.source)
+    print(
+        review.key,
+        review.old_source,
+        review.new_source,
+        review.translation,
+    )
 ```
 
 ### Translation keys
@@ -214,7 +219,7 @@ Each `Locale` contains `code`, `translation_count`, `missing_count`, `review_cou
 
 ### `Missing` and `Review`
 
-Both models contain `key`, `locale`, `source`, and `translation_url`. `Review` additionally contains `previous_source`, which is `None` when no previous source text exists. This source difference is distinct from changes to the translation itself.
+`Missing` contains `key`, `locale`, `source`, and `translation_url`. `Review` contains `key`, `locale`, `old_source`, `new_source`, `translation`, and `translation_url`; `old_source` is `None` when the website has no earlier source text. The source difference is distinct from changes to the translation itself.
 
 ### `Change`
 
@@ -226,13 +231,11 @@ Each change has the following fields:
 | `key` | Translation key |
 | `locale` | Locale changed by the record |
 | `action` | `added`, `modified`, or `deleted` |
+| `actor` | Contributor login, or `API` for an automated change |
 | `old_value` | Previous text, or `None` for an addition |
 | `new_value` | New text, or `None` for a deletion |
 | `occurred_at` | UTC-aware `datetime` |
 | `translation_url` | Translation page for the key and locale |
-| `actor_login` | Contributor login, or `None` for an automated change |
-| `actor_url` | Contributor profile URL, when available |
-| `actor_avatar_url` | Contributor avatar URL, when available |
 
 `ChangeAction` is the literal type `"added" | "modified" | "deleted"`. `SOURCE_LOCALE` is `"en"`.
 
@@ -251,7 +254,7 @@ These reference measurements were taken from the public `noctalia` project in Au
 | `translations()` | One batch request per 50 keys | Two keys and two locales, about 1.3 KB, about 1.4 s |
 | `search_translations()` | Search pages plus one batch request | 19 Simplified Chinese matches, about 1.7 s |
 | `missing()` | One missing query plus batched source queries | Matching entries and their English source text |
-| `reviews()` | One review query | Matching keys and their English source difference |
+| `reviews()` | One review query and batched translation lookup | Matching keys, source differences, and current translations |
 | `keys()` | One key-tree page | About 2,474 keys and 147 KB |
 | `changes()` | One request per selected key | Example key, about 1.3 KB and 1.4 s |
 | `iter_changes()` | Recent Changes pages until the boundary | Depends on the requested range |

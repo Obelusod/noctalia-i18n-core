@@ -20,11 +20,11 @@ def _change(
         key="settings.widgets.settings.scroll-repeat.description",
         locale="zh-Hans",
         action=action,
+        actor="Obelusod",
         old_value=old_value,
         new_value=new_value,
         occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
         translation_url="https://i18n.noctalia.dev/projects/noctalia/translate",
-        actor_login="Obelusod",
     )
 
 
@@ -46,10 +46,9 @@ class ChangeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(_change(), translation_url="")
 
-    def test_automated_changes_need_no_actor(self) -> None:
-        change = replace(_change(), actor_login=None)
-        self.assertIsNone(change.actor_login)
-        self.assertEqual(change.occurred_at.tzinfo, UTC)
+    def test_changes_require_an_actor(self) -> None:
+        with self.assertRaises(ValueError):
+            replace(_change(), actor="")
 
 
 class ProjectTests(unittest.TestCase):

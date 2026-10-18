@@ -299,6 +299,24 @@ class ClientTests(unittest.TestCase):
                         LABEL: {"en": translation_record(LABEL, "en", LABEL_EN)},
                     }
                 },
+                {
+                    "translations": {
+                        "settings.schema.appearance.theme-mode.description": {
+                            "fr": translation_record(
+                                "settings.schema.appearance.theme-mode.description",
+                                "fr",
+                                "Choisir Sombre, Clair ou Auto selon l’heure",
+                            )
+                        },
+                        "desktop-widgets.editor.settings.change-image": {
+                            "fr": translation_record(
+                                "desktop-widgets.editor.settings.change-image",
+                                "fr",
+                                "Changer…",
+                            )
+                        },
+                    }
+                },
             ),
         )
         with NoctaliaClient("noctalia", timeout=10, session=session) as client:
@@ -315,23 +333,32 @@ class ClientTests(unittest.TestCase):
         self.assertIn("locale=fr", missing[0].translation_url)
         self.assertEqual(reviews[0].locale, "fr")
         self.assertEqual(
-            reviews[0].previous_source,
+            reviews[0].old_source,
             "Choose dark, light, or auto based on time of day",
         )
         self.assertEqual(
-            reviews[0].source,
+            reviews[0].new_source,
             "Choose Dark, Light, or Auto based on time of day",
         )
-        self.assertIsNone(reviews[1].previous_source)
+        self.assertEqual(
+            reviews[0].translation,
+            "Choisir Sombre, Clair ou Auto selon l’heure",
+        )
+        self.assertIsNone(reviews[1].old_source)
         self.assertIn("locale=fr", reviews[0].translation_url)
 
     def test_changes_merge_keys_newest_first(self) -> None:
-        def record(key: str, change_id: str, created_at: int) -> dict[str, object]:
+        def record(
+            key: str,
+            change_id: str,
+            created_at: int,
+            actor: str | None,
+        ) -> dict[str, object]:
             return {
                 "id": change_id,
                 "translation_key": key,
                 "locale": "zh-Hans",
-                "created_by_login": "editor",
+                "created_by_login": actor,
                 "created_at": created_at,
                 "text": PREVIOUS_DESCRIPTION_ZH,
                 "new_text": DESCRIPTION_ZH,
@@ -339,13 +366,14 @@ class ClientTests(unittest.TestCase):
 
         session = Session(
             get_responses=(
-                {"history": [record(DESCRIPTION, "1", 1_000)]},
-                {"history": [record(LABEL, "2", 2_000)]},
+                {"history": [record(DESCRIPTION, "1", 1_000, "editor")]},
+                {"history": [record(LABEL, "2", 2_000, None)]},
             )
         )
         with NoctaliaClient("noctalia", timeout=10, session=session) as client:
             result = client.changes(DESCRIPTION, LABEL, locale="zh-Hans")
         self.assertEqual([change.id for change in result], ["2", "1"])
+        self.assertEqual([change.actor for change in result], ["API", "editor"])
 
     def test_change_stream_is_lazy_and_stops_at_the_time_boundary(self) -> None:
         session = Session(
@@ -461,7 +489,7 @@ class ClientTests(unittest.TestCase):
             {"changesPage": 1, "changesLocale": "zh-Hans"},
         )
 
-    def test_change_pages_validate_start_anchor_and_duplicate_ids(self) -> None:
+    def test_change_pages_validate_start_anchor_and_skip_page_overlap(self) -> None:
         with self.assertRaises(ValueError):
             NoctaliaClient("noctalia", timeout=10).change_pages(start_page=0)
 
@@ -495,13 +523,55 @@ class ClientTests(unittest.TestCase):
                         PREVIOUS_DESCRIPTION_ZH,
                         DESCRIPTION_ZH,
                     ),
+                    (
+                        "0",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        500,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
                     page=2,
                     total_pages=2,
                 ),
             )
         )
         with NoctaliaClient("noctalia", timeout=10, session=duplicate) as client:
-            with self.assertRaises(RuntimeError):
+            pages = tuple(client.change_pages())
+        self.assertEqual(
+            [[change.id for change in page.changes] for page in pages],
+            [["1"], ["0"]],
+        )
+
+        same_page = Session(
+            get_responses=(
+                changes_page(
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        2_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    (
+                        "1",
+                        DESCRIPTION,
+                        "zh-Hans",
+                        "editor",
+                        1_000,
+                        PREVIOUS_DESCRIPTION_ZH,
+                        DESCRIPTION_ZH,
+                    ),
+                    page=1,
+                    total_pages=1,
+                ),
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=same_page) as client:
+            with self.assertRaisesRegex(RuntimeError, "duplicate ID"):
                 tuple(client.change_pages())
 
         start = Session(
