@@ -29,6 +29,7 @@ _BASE_URL = "https://i18n.noctalia.dev"
 _RETRYABLE_METHODS = frozenset({"GET", "POST"})
 _RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _TRANSLATION_BATCH_SIZE = 100
+_CATALOG_LOOKUP_THRESHOLD = 2000
 type _JsonValue = (
     None | bool | int | float | str | list[_JsonValue] | dict[str, _JsonValue]
 )
@@ -888,7 +889,7 @@ class NoctaliaClient:
     def missing(
         self, locale: str, /, *, query: str | None = None
     ) -> tuple[Missing, ...]:
-        """Return source entries without a translation in one locale."""
+        """Return untranslated keys and any available source text."""
 
         locale = _text(locale, "locale")
         parameters: dict[str, int | str] = {"locale": locale}
@@ -904,12 +905,10 @@ class NoctaliaClient:
         keys = _parse_missing(payload)
         if not keys:
             return ()
-        translations = self.translations(keys[0], *keys[1:], locales=(SOURCE_LOCALE,))
+        translations = self._lookup_translations(keys, SOURCE_LOCALE)
         output: list[Missing] = []
         for key in keys:
-            source = translations[key].get(SOURCE_LOCALE)
-            if source is None:
-                raise RuntimeError(f"Missing translation {key!r} has no source text")
+            source = translations.get(key)
             output.append(
                 Missing(
                     key=key,
@@ -940,10 +939,10 @@ class NoctaliaClient:
         if not sources:
             return ()
         keys = tuple(item[0] for item in sources)
-        translations = self.translations(*keys, locales=(locale,))
+        translations = self._lookup_translations(keys, locale)
         output: list[Review] = []
         for key, old_source, new_source in sources:
-            translation = translations[key].get(locale)
+            translation = translations.get(key)
             if translation is None:
                 raise RuntimeError(
                     f"Translation needing review {key!r} has no {locale!r} translation"
@@ -1136,6 +1135,23 @@ class NoctaliaClient:
             raise RuntimeError(
                 f"Change cursor {cursor!r} was not found in the project stream"
             )
+
+    def _lookup_translations(
+        self, keys: tuple[str, ...], locale: str
+    ) -> dict[str, str]:
+        if len(keys) > _CATALOG_LOOKUP_THRESHOLD:
+            values = self.catalog()
+            for key in keys:
+                text = values.get(key, {}).get(locale)
+                if text is not None:
+                    _string(text, f"Translation {key!r} {locale!r} text")
+        else:
+            values = self.translations(*keys, locales=(locale,))
+        return {
+            key: translations[locale]
+            for key in keys
+            if locale in (translations := values.get(key, {}))
+        }
 
     def _fetch_changes(self, key: str, locale: str) -> tuple[Change, ...]:
         payload = _request_json(

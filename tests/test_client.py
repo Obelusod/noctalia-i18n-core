@@ -385,6 +385,64 @@ class ClientTests(unittest.TestCase):
         self.assertIsNone(reviews[1].old_source)
         self.assertIn("locale=fr", reviews[0].translation_url)
 
+    def test_large_missing_query_uses_one_export_and_preserves_absent_source(
+        self,
+    ) -> None:
+        keys = tuple(f"key-{index}" for index in range(2001))
+        source = {key: key for key in keys[1:]}
+        session = Session(
+            get_responses=(
+                {"keys": list(keys), "count": len(keys)},
+                {"en": source, "fr": {keys[0]: "Texte"}},
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            missing = client.missing("de")
+        self.assertEqual(tuple(item.key for item in missing), keys)
+        self.assertIsNone(missing[0].source)
+        self.assertEqual(missing[-1].source, keys[-1])
+        self.assertEqual(len(session.get_calls), 2)
+        self.assertEqual(session.post_calls, [])
+
+    def test_large_lookup_rejects_blank_text_as_a_response_error(self) -> None:
+        keys = tuple(f"key-{index}" for index in range(2001))
+        source = {key: key for key in keys}
+        source[keys[-1]] = " "
+        session = Session(
+            get_responses=(
+                {"keys": list(keys), "count": len(keys)},
+                {"en": source},
+            )
+        )
+        with (
+            NoctaliaClient("noctalia", timeout=10, session=session) as client,
+            self.assertRaisesRegex(RuntimeError, "not a non-empty string"),
+        ):
+            client.missing("fr")
+
+    def test_large_review_query_uses_one_export_for_current_values(self) -> None:
+        keys = tuple(f"key-{index}" for index in range(2001))
+        session = Session(
+            get_responses=(
+                {
+                    "items": [
+                        {"key": key, "enOld": None, "enNew": key} for key in keys
+                    ],
+                    "count": len(keys),
+                },
+                {
+                    "en": {key: key for key in keys},
+                    "fr": {key: f"fr-{key}" for key in keys},
+                },
+            )
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            reviews = client.reviews("fr")
+        self.assertEqual(tuple(item.key for item in reviews), keys)
+        self.assertEqual(reviews[-1].translation, f"fr-{keys[-1]}")
+        self.assertEqual(len(session.get_calls), 2)
+        self.assertEqual(session.post_calls, [])
+
     def test_project_ignores_unrelated_serialized_page_fields(self) -> None:
         payload = indexed_page(
             {

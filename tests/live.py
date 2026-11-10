@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
 from typing import override
 
@@ -74,14 +73,20 @@ class LiveTests(unittest.TestCase):
             reviews_locale = max(
                 project.locales, key=lambda locale: locale.review_count
             )
+            missing = client.missing(missing_locale.code)
+            self.assertEqual(len(missing), missing_locale.missing_count)
             self.assertEqual(
-                len(client.missing(missing_locale.code)),
-                missing_locale.missing_count,
+                {item.key: item.source for item in missing},
+                {
+                    key: values.get(SOURCE_LOCALE)
+                    for key, values in catalog.items()
+                    if not values.get(missing_locale.code)
+                },
             )
-            self.assertEqual(
-                len(client.reviews(reviews_locale.code)),
-                reviews_locale.review_count,
-            )
+            reviews = client.reviews(reviews_locale.code)
+            self.assertEqual(len(reviews), reviews_locale.review_count)
+            for review in reviews:
+                self.assertEqual(review.translation, catalog[review.key][review.locale])
 
             latest = next(client.iter_changes(), None)
             if latest is not None:
@@ -94,11 +99,6 @@ class LiveTests(unittest.TestCase):
                 )
 
     def test_every_public_project(self) -> None:
-        slugs = _projects()
-        with ThreadPoolExecutor(max_workers=min(4, len(slugs))) as executor:
-            pending = {
-                executor.submit(self._verify_project, slug): slug for slug in slugs
-            }
-            for future in as_completed(pending):
-                with self.subTest(project=pending[future]):
-                    future.result()
+        for slug in _projects():
+            with self.subTest(project=slug):
+                self._verify_project(slug)

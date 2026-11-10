@@ -223,7 +223,7 @@ Each `Locale` contains `code`, `translation_count`, `missing_count`, `review_cou
 
 ### `Missing` and `Review`
 
-`Missing` contains `key`, `locale`, `source`, and `translation_url`. `Review` contains `key`, `locale`, `old_source`, `new_source`, `translation`, and `translation_url`; `old_source` is `None` when the website has no earlier source text. The source difference is distinct from changes to the translation itself.
+`Missing` contains `key`, `locale`, `source`, and `translation_url`. `source` is `None` when the key has no English translation. `Review` contains `key`, `locale`, `old_source`, `new_source`, `translation`, and `translation_url`; `old_source` is `None` when the website has no earlier source text. The source difference is distinct from changes to the translation itself.
 
 ### `Change`
 
