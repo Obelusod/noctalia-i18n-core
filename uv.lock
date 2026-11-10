@@ -153,7 +153,7 @@ wheels = [
 
 [[package]]
 name = "noctalia-i18n-core"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "requests" },
