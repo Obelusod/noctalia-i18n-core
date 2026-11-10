@@ -272,10 +272,10 @@ uv sync --locked
 Run formatting, linting, type checking, and tests:
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run basedpyright
-uv run python -m unittest discover -v
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked pyrefly check
+uv run --locked python -m unittest discover -v
 ```
 
 The default suite validates models, response parsing, and client behavior without accessing external services.
@@ -283,7 +283,7 @@ The default suite validates models, response parsing, and client behavior withou
 Run the live contract tests explicitly to verify every public operation against the current public projects on Noctalia Translate:
 
 ```bash
-uv run python -m unittest tests.live -v
+uv run --locked python -m unittest tests.live -v
 ```
 
 Build and inspect both distributions:

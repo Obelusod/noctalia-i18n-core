@@ -2,19 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Unpack, override
+from typing import override
 
 import requests
-
-if TYPE_CHECKING:
-    from requests._types import (
-        DataType,
-        GetKwargs,
-        JsonType,
-        ParamsType,
-        PostKwargs,
-        UriType,
-    )
 
 type JsonValue = (
     None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -48,9 +38,9 @@ class Session(requests.Session):
     @override
     def get(
         self,
-        url: UriType,
-        params: ParamsType = None,
-        **kwargs: Unpack[GetKwargs],
+        url: str | bytes,
+        params: object = None,
+        **kwargs: object,
     ) -> requests.Response:
         self.get_calls.append((str(url), {"params": params, **kwargs}))
         if not self._get_responses:
@@ -65,10 +55,10 @@ class Session(requests.Session):
     @override
     def post(
         self,
-        url: UriType,
-        data: DataType = None,
-        json: JsonType = None,
-        **kwargs: Unpack[PostKwargs],
+        url: str | bytes,
+        data: object = None,
+        json: object = None,
+        **kwargs: object,
     ) -> requests.Response:
         self.post_calls.append((str(url), {"data": data, "json": json, **kwargs}))
         if not self._post_responses:
