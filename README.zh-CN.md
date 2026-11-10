@@ -73,7 +73,9 @@ for locale in project.locales:
 
 ### 当前译文
 
-`translations()` 按网站使用的批量大小读取一个或多个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
+`translations()` 每批最多读取 100 个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
+
+指定 `locales` 可减少响应数据；省略时会先请求项目元数据，以选择全部已配置的 locale。多次操作复用同一个客户端可复用连接。
 
 ```python
 values = client.translations(
@@ -177,6 +179,8 @@ NoctaliaClient(project, *, timeout, session=None)
 
 `project` 是网站项目标识。`timeout` 是每次尝试所使用的正有限秒数。默认情况下，临时连接故障、超时、限流和服务端错误会按退避策略重试三次。`session` 可以是调用方管理的 `requests.Session`；客户端会保留其传输策略，也不会将其关闭。
 
+跨多个请求的查询不构成原子快照。
+
 | 成员 | 返回值 |
 | --- | --- |
 | `slug` | 构造函数接收的项目标识 |
@@ -242,24 +246,6 @@ NoctaliaClient(project, *, timeout, session=None)
 ### `ChangePage`
 
 `ChangePage` 包含 `number`、`total_pages`、`changes` 和 `cursor`。`cursor` 对应页面中最后一条原始网站记录，即使该记录没有规范化为 `Change` 也会保留；调用方应将其视为只用于继续读取的不透明值。
-
-## 性能参考
-
-以下数据来自 2026 年 8 月公开的 `noctalia` 项目，描述的是网络请求，不包含本地缓存。
-
-| 操作 | 请求 | 参考结果 |
-| --- | --- | --- |
-| `project()` | 一次项目页面请求 | 25 个 locale 的项目进度，约 23 KB |
-| `catalog()` | 一次完整导出 | 42,857 条译文，约 2.23 MB，约 4.4–4.8 秒 |
-| `translations()` | 每 50 个键一次批量请求 | 两个键、两个 locale，约 1.3 KB，约 1.4 秒 |
-| `search_translations()` | 搜索页面及一次批量请求 | 简体中文匹配 19 个，约 1.7 秒 |
-| `missing()` | 一次缺失查询及分批原文查询 | 返回匹配条目及其英文原文 |
-| `reviews()` | 一次待复核查询及分批译文查询 | 返回匹配键、英文原文差异与当前译文 |
-| `keys()` | 一次键树请求 | 约 2,474 个键，147 KB |
-| `changes()` | 每个请求键一次请求 | 示例键约 1.3 KB，约 1.4 秒 |
-| `iter_changes()` | 读取变更页直到边界 | 取决于请求范围 |
-
-实际耗时受网络延迟、服务器负载和项目规模影响。精确查询和文本搜索不会下载完整当前目录。
 
 ## 开发
 

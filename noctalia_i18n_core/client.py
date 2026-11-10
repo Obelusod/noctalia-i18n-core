@@ -12,8 +12,7 @@ from typing import Self, TypeGuard
 from urllib.parse import quote, urlencode
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
+from requests.adapters import HTTPAdapter, Retry
 
 from .models import (
     SOURCE_LOCALE,
@@ -29,7 +28,7 @@ from .models import (
 _BASE_URL = "https://i18n.noctalia.dev"
 _RETRYABLE_METHODS = frozenset({"GET", "POST"})
 _RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
-_TRANSLATION_BATCH_SIZE = 50
+_TRANSLATION_BATCH_SIZE = 100
 type _JsonValue = (
     None | bool | int | float | str | list[_JsonValue] | dict[str, _JsonValue]
 )
@@ -313,9 +312,13 @@ def _expand_indexed(
     return value
 
 
-def _page_object(payload: _JsonValue, resource: str) -> dict[str, _JsonValue]:
+def _page_object(
+    payload: _JsonValue, resource: str, *fields: str
+) -> dict[str, _JsonValue]:
     values = _page_values(payload, resource)
-    return _object(_expand_indexed(values[0], values, resource), resource)
+    root = _object(values[0], resource)
+    selected = {name: root[name] for name in fields if name in root}
+    return _object(_expand_indexed(selected, values, resource), resource)
 
 
 def _validate_project(
@@ -330,7 +333,15 @@ def _validate_project(
 
 def _parse_project(payload: _JsonValue, project: str) -> Project:
     resource = "Project metadata"
-    root = _page_object(payload, resource)
+    root = _page_object(
+        payload,
+        resource,
+        "project",
+        "stats",
+        "locales",
+        "missingByLocale",
+        "outdatedByLocale",
+    )
     data = _validate_project(root, project, resource)
     name = _string(_member(data, "name", resource), f"{resource} project name")
     description = _optional_string(
@@ -435,7 +446,7 @@ def _tree_keys(value: _JsonValue) -> list[str]:
 
 def _parse_keys(payload: _JsonValue, project: str) -> tuple[str, ...]:
     resource = "Key tree"
-    root = _page_object(payload, resource)
+    root = _page_object(payload, resource, "project", "tree", "totalKeys")
     _validate_project(root, project, resource)
     keys = _tree_keys(_member(root, "tree", resource))
     total = _integer(_member(root, "totalKeys", resource), "Key tree total", minimum=0)
@@ -444,8 +455,7 @@ def _parse_keys(payload: _JsonValue, project: str) -> tuple[str, ...]:
     return tuple(keys)
 
 
-def _flatten(value: _JsonValue, path: str = "") -> dict[str, str]:
-    output: dict[str, str] = {}
+def _flatten(value: _JsonValue, path: str = "") -> Iterator[tuple[str, str]]:
     if isinstance(value, dict):
         if not value:
             raise RuntimeError(
@@ -454,20 +464,19 @@ def _flatten(value: _JsonValue, path: str = "") -> dict[str, str]:
         for segment, child in value.items():
             if not segment:
                 raise RuntimeError("Translation export contains an empty mapping key")
-            output.update(_flatten(child, f"{path}.{segment}" if path else segment))
-        return output
+            yield from _flatten(child, f"{path}.{segment}" if path else segment)
+        return
     if not isinstance(value, str):
         raise RuntimeError(
             f"Translation export contains a non-string value at {path!r}"
         )
-    output[path] = value
-    return output
+    yield path, value
 
 
 def _parse_translations(
     payload: _JsonValue,
     requested_keys: tuple[str, ...],
-    selected_locales: tuple[str, ...] | None,
+    selected_locales: tuple[str, ...],
 ) -> dict[str, dict[str, str]]:
     resource = "Translations"
     root = _object(payload, resource)
@@ -478,7 +487,7 @@ def _parse_translations(
             raise RuntimeError(f"Translations contains unexpected key {key!r}")
         locale_records = _object(values, f"Translation {key!r}")
         for locale, value in locale_records.items():
-            if selected_locales is not None and locale not in selected_locales:
+            if locale not in selected_locales:
                 raise RuntimeError(
                     f"Translation {key!r} contains unexpected locale {locale!r}"
                 )
@@ -494,8 +503,6 @@ def _parse_translations(
                 raise RuntimeError(f"{label} contains inconsistent identifiers")
             text = _string(_member(record, "text", label), f"{label} text")
             output[key][locale] = text
-    if selected_locales is None:
-        return output
     return {
         key: {
             locale: output[key][locale]
@@ -514,7 +521,16 @@ def _parse_search_page(
     requested_page: int,
 ) -> tuple[tuple[str, ...], int, int]:
     resource = "Translation search"
-    root = _page_object(payload, resource)
+    root = _page_object(
+        payload,
+        resource,
+        "project",
+        "search",
+        "initialLocale",
+        "page",
+        "totalPages",
+        "keys",
+    )
     _validate_project(root, project, resource)
     returned_query = _string(_member(root, "search", resource), f"{resource} query")
     returned_locale = _string(
@@ -632,7 +648,15 @@ def _parse_change_page(
     payload: _JsonValue, project: str, locale_filter: str | None
 ) -> _ParsedChangePage:
     resource = "Recent Changes"
-    root = _page_object(payload, resource)
+    root = _page_object(
+        payload,
+        resource,
+        "project",
+        "changesLocale",
+        "changesPage",
+        "changesTotalPages",
+        "recentChanges",
+    )
     project_data = _validate_project(root, project, resource)
     project_id = _string(
         _member(project_data, "id", resource), f"{resource} project ID"
@@ -792,7 +816,7 @@ class NoctaliaClient:
                 raise RuntimeError(f"Invalid translation data for {locale!r}")
             if not tree:
                 continue
-            for key, value in _flatten(tree).items():
+            for key, value in _flatten(tree):
                 output.setdefault(key, {})[locale] = value
         return output
 
@@ -807,13 +831,11 @@ class NoctaliaClient:
 
         selected_keys = _keys((key, *keys), "keys")
         selected_locales = _locales(locales, "locales")
-        output: dict[str, dict[str, str]] = {
-            selected_key: {} for selected_key in selected_keys
-        }
+        if selected_locales is None:
+            selected_locales = tuple(locale.code for locale in self.project().locales)
+        output: dict[str, dict[str, str]] = {}
         for batch in batched(selected_keys, _TRANSLATION_BATCH_SIZE):
-            body = {"keys": list(batch)}
-            if selected_locales is not None:
-                body["locales"] = list(selected_locales)
+            body = {"keys": list(batch), "locales": list(selected_locales)}
             payload = _request_json(
                 self._session,
                 self._batch_url,
@@ -837,7 +859,7 @@ class NoctaliaClient:
         search_locale = _text(search_locale, "search_locale")
         selected_locales = _locales(locales, "locales")
         page = 1
-        found: list[str] = []
+        found: dict[str, None] = {}
         while True:
             payload = _request_json(
                 self._session,
@@ -853,9 +875,7 @@ class NoctaliaClient:
             keys, current_page, total_pages = _parse_search_page(
                 payload, self._project, query, search_locale, page
             )
-            for key in keys:
-                if key not in found:
-                    found.append(key)
+            found.update(dict.fromkeys(keys))
             if current_page >= total_pages:
                 break
             page = current_page + 1
@@ -863,7 +883,7 @@ class NoctaliaClient:
             selected_locales = (search_locale,)
         if not found:
             return {}
-        return self.translations(found[0], *found[1:], locales=selected_locales)
+        return self.translations(*found, locales=selected_locales)
 
     def missing(
         self, locale: str, /, *, query: str | None = None

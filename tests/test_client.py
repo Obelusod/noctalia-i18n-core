@@ -151,7 +151,7 @@ class ClientTests(unittest.TestCase):
         )
 
     def test_translations_follow_the_website_batch_size(self) -> None:
-        keys = tuple(f"settings.example.option-{index}" for index in range(51))
+        keys = tuple(f"settings.example.option-{index}" for index in range(101))
 
         def response(selected: tuple[str, ...]) -> dict[str, object]:
             return {
@@ -161,7 +161,7 @@ class ClientTests(unittest.TestCase):
             }
 
         session = Session(
-            post_responses=(response(keys[:50]), response(keys[50:])),
+            post_responses=(response(keys[:100]), response(keys[100:])),
         )
         with NoctaliaClient("noctalia", timeout=10, session=session) as client:
             result = client.translations(keys[0], *keys[1:], locales=("en",))
@@ -170,9 +170,46 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(
             [call[1]["json"] for call in session.post_calls],
             [
-                {"keys": list(keys[:50]), "locales": ["en"]},
-                {"keys": list(keys[50:]), "locales": ["en"]},
+                {"keys": list(keys[:100]), "locales": ["en"]},
+                {"keys": list(keys[100:]), "locales": ["en"]},
             ],
+        )
+
+    def test_translations_without_locales_fetches_configured_languages(self) -> None:
+        session = Session(
+            get_responses=(
+                indexed_page(
+                    {
+                        "project": {
+                            "slug": "noctalia",
+                            "name": "Noctalia",
+                            "description": None,
+                            "ai_context": None,
+                        },
+                        "stats": {"totalKeys": 1},
+                        "locales": ["en", "zh-Hans"],
+                        "missingByLocale": {"en": 0, "zh-Hans": 0},
+                        "outdatedByLocale": {},
+                    }
+                ),
+            ),
+            post_responses=(
+                {
+                    "translations": {
+                        LABEL: {
+                            "en": translation_record(LABEL, "en", LABEL_EN),
+                            "zh-Hans": translation_record(LABEL, "zh-Hans", LABEL_ZH),
+                        }
+                    }
+                },
+            ),
+        )
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            result = client.translations(LABEL)
+        self.assertEqual(result, {LABEL: {"en": LABEL_EN, "zh-Hans": LABEL_ZH}})
+        self.assertEqual(
+            session.post_calls[0][1]["json"],
+            {"keys": [LABEL], "locales": ["en", "zh-Hans"]},
         )
 
     def test_search_reads_every_page_then_fetches_values_once(self) -> None:
@@ -193,7 +230,7 @@ class ClientTests(unittest.TestCase):
                         "project": {"slug": "noctalia"},
                         "search": "滚动",
                         "initialLocale": "zh-Hans",
-                        "keys": [LABEL],
+                        "keys": [DESCRIPTION, LABEL],
                         "page": 2,
                         "totalPages": 2,
                     }
@@ -229,6 +266,7 @@ class ClientTests(unittest.TestCase):
                 LABEL: {"en": LABEL_EN, "zh-Hans": LABEL_ZH},
             },
         )
+        self.assertEqual(tuple(result), (DESCRIPTION, LABEL))
         self.assertEqual(len(session.post_calls), 1)
 
     def test_key_tree_preserves_real_segments_and_hierarchy_boundaries(self) -> None:
@@ -346,6 +384,30 @@ class ClientTests(unittest.TestCase):
         )
         self.assertIsNone(reviews[1].old_source)
         self.assertIn("locale=fr", reviews[0].translation_url)
+
+    def test_project_ignores_unrelated_serialized_page_fields(self) -> None:
+        payload = indexed_page(
+            {
+                "project": {
+                    "slug": "noctalia",
+                    "name": "Noctalia",
+                    "description": None,
+                    "ai_context": None,
+                },
+                "stats": {"totalKeys": 0},
+                "locales": [],
+                "missingByLocale": {},
+                "outdatedByLocale": {},
+            }
+        )
+        nodes = payload["nodes"]
+        assert isinstance(nodes, list) and isinstance(nodes[-1], dict)
+        values = nodes[-1]["data"]
+        assert isinstance(values, list) and isinstance(values[0], dict)
+        values[0]["unrelated"] = -1
+        session = Session(get_responses=(payload,))
+        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+            self.assertEqual(client.project().key_count, 0)
 
     def test_changes_merge_keys_newest_first(self) -> None:
         def record(
@@ -674,7 +736,7 @@ class ClientTests(unittest.TestCase):
             NoctaliaClient("noctalia", timeout=10, session=session) as client,
             self.assertRaises(RuntimeError),
         ):
-            client.translations(DESCRIPTION)
+            client.translations(DESCRIPTION, locales=("en",))
 
     def test_owned_session_retries_a_temporary_server_failure(self) -> None:
         _RetryHandler.attempts = 0
