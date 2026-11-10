@@ -182,19 +182,15 @@ class Change:
             _text(value, f"Change {name}")
         if self.action not in ("added", "modified", "deleted"):
             raise ValueError(f"Invalid change action: {self.action!r}")
-        valid = {
-            "added": self.old_value is None
-            and isinstance(self.new_value, str)
-            and self.new_value != "",
-            "modified": isinstance(self.old_value, str)
-            and self.old_value != ""
-            and isinstance(self.new_value, str)
-            and self.new_value != "",
-            "deleted": isinstance(self.old_value, str)
-            and self.old_value != ""
-            and self.new_value is None,
-        }
-        if not valid[self.action]:
+        has_old = isinstance(self.old_value, str) and self.old_value != ""
+        has_new = isinstance(self.new_value, str) and self.new_value != ""
+        if self.action == "added":
+            valid = self.old_value is None and has_new
+        elif self.action == "deleted":
+            valid = has_old and self.new_value is None
+        else:
+            valid = has_old and has_new
+        if not valid:
             raise ValueError(f"Change values do not match action {self.action!r}")
         _text(self.actor, "Change actor")
         object.__setattr__(self, "occurred_at", _utc(self.occurred_at))

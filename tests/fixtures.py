@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import override
 
 import requests
@@ -29,8 +30,8 @@ class Session(requests.Session):
         post_responses: tuple[object, ...] = (),
     ) -> None:
         super().__init__()
-        self._get_responses = list(get_responses)
-        self._post_responses = list(post_responses)
+        self._get_responses = deque(get_responses)
+        self._post_responses = deque(post_responses)
         self.get_calls: list[tuple[str, dict[str, object]]] = []
         self.post_calls: list[tuple[str, dict[str, object]]] = []
         self.closed_by_client = False
@@ -45,7 +46,7 @@ class Session(requests.Session):
         self.get_calls.append((str(url), {"params": params, **kwargs}))
         if not self._get_responses:
             raise AssertionError(f"Unexpected GET request: {url}")
-        response = self._get_responses.pop(0)
+        response = self._get_responses.popleft()
         if isinstance(response, BaseException):
             raise response
         return (
@@ -63,7 +64,7 @@ class Session(requests.Session):
         self.post_calls.append((str(url), {"data": data, "json": json, **kwargs}))
         if not self._post_responses:
             raise AssertionError(f"Unexpected POST request: {url}")
-        response = self._post_responses.pop(0)
+        response = self._post_responses.popleft()
         if isinstance(response, BaseException):
             raise response
         return (

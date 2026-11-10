@@ -73,7 +73,9 @@ for locale in project.locales:
 
 ### Current translations
 
-`translations()` reads one or more exact keys in website-sized batches. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
+`translations()` reads exact keys in batches of up to 100. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
+
+Specify `locales` to limit response size; omitting it first fetches project metadata to select all configured locales. Reuse one client for connection reuse across calls.
 
 ```python
 values = client.translations(
@@ -177,6 +179,8 @@ NoctaliaClient(project, *, timeout, session=None)
 
 `project` is the website project identifier. `timeout` is a positive finite number of seconds applied to each attempt. By default, temporary connection, timeout, rate-limit, and server failures are retried three times with backoff. `session` may be a caller-owned `requests.Session`; its transport policy is preserved and the client does not close it.
 
+Queries spanning multiple requests are not atomic snapshots.
+
 | Member | Result |
 | --- | --- |
 | `slug` | The project identifier passed to the constructor |
@@ -242,24 +246,6 @@ Each change has the following fields:
 ### `ChangePage`
 
 `ChangePage` contains `number`, `total_pages`, `changes`, and `cursor`. `cursor` corresponds to the final raw website record on the page, including a record that normalizes to no `Change`; callers should treat it only as an opaque resume value.
-
-## Performance reference
-
-These reference measurements were taken from the public `noctalia` project in August 2026. They describe website requests without a local cache.
-
-| Operation | Requests | Reference result |
-| --- | --- | --- |
-| `project()` | One project page request | Progress for 25 locales, about 23 KB |
-| `catalog()` | One complete export | 42,857 strings, about 2.23 MB, 4.4–4.8 s |
-| `translations()` | One batch request per 50 keys | Two keys and two locales, about 1.3 KB, about 1.4 s |
-| `search_translations()` | Search pages plus one batch request | 19 Simplified Chinese matches, about 1.7 s |
-| `missing()` | One missing query plus batched source queries | Matching entries and their English source text |
-| `reviews()` | One review query and batched translation lookup | Matching keys, source differences, and current translations |
-| `keys()` | One key-tree page | About 2,474 keys and 147 KB |
-| `changes()` | One request per selected key | Example key, about 1.3 KB and 1.4 s |
-| `iter_changes()` | Recent Changes pages until the boundary | Depends on the requested range |
-
-Latency, server load, and project growth affect these values. Exact queries and text searches do not download the complete catalog.
 
 ## Development
 

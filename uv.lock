@@ -157,7 +157,6 @@ version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "requests" },
-    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -167,10 +166,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "requests", specifier = ">=2.32" },
-    { name = "urllib3", specifier = ">=1.26" },
-]
+requires-dist = [{ name = "requests", specifier = ">=2.32" }]
 
 [package.metadata.requires-dev]
 dev = [
