@@ -118,21 +118,22 @@ class Project:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Missing:
-    """One source entry without a translation in the selected locale."""
+    """One untranslated key, with source text when available."""
 
     key: str
     locale: str
-    source: str
+    source: str | None
     translation_url: str
 
     def __post_init__(self) -> None:
         for name, value in (
             ("key", self.key),
             ("locale", self.locale),
-            ("source", self.source),
             ("translation_url", self.translation_url),
         ):
             _text(value, f"Missing {name}")
+        if self.source is not None:
+            _text(self.source, "Missing source")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

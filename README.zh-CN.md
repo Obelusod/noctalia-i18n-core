@@ -106,7 +106,7 @@ matches = client.search_translations(
 
 ### 缺失与待复核译文
 
-`missing()` 返回指定 locale 中缺少译文的原文条目。`reviews()` 返回译文保存后英文原文发生变化的条目，并包含变更前后的原文与当前译文。两种查询均可使用 `query` 筛选结果。
+`missing()` 返回指定 locale 中未翻译的键及可用的英文原文。`reviews()` 返回译文保存后英文原文发生变化的条目，并包含变更前后的原文与当前译文。两种查询均可使用 `query` 筛选结果。
 
 ```python
 missing = client.missing("fr", query="scroll")
@@ -223,7 +223,7 @@ NoctaliaClient(project, *, timeout, session=None)
 
 ### `Missing` 与 `Review`
 
-`Missing` 包含 `key`、`locale`、`source` 和 `translation_url`。`Review` 包含 `key`、`locale`、`old_source`、`new_source`、`translation` 和 `translation_url`；网站没有此前原文时，`old_source` 为 `None`。这里的原文差异不代表译文本身的变更记录。
+`Missing` 包含 `key`、`locale`、`source` 和 `translation_url`。键没有英文译文时，`source` 为 `None`。`Review` 包含 `key`、`locale`、`old_source`、`new_source`、`translation` 和 `translation_url`；网站没有此前原文时，`old_source` 为 `None`。这里的原文差异不代表译文本身的变更记录。
 
 ### `Change`
 
