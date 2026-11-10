@@ -494,9 +494,11 @@ class ClientTests(unittest.TestCase):
             NoctaliaClient("noctalia", timeout=10).change_pages(start_page=0)
 
         missing = Session(get_responses=(changes_page(page=1, total_pages=1),))
-        with NoctaliaClient("noctalia", timeout=10, session=missing) as client:
-            with self.assertRaises(RuntimeError):
-                tuple(client.change_pages(cursor="missing"))
+        with (
+            NoctaliaClient("noctalia", timeout=10, session=missing) as client,
+            self.assertRaises(RuntimeError),
+        ):
+            tuple(client.change_pages(cursor="missing"))
 
         duplicate = Session(
             get_responses=(
@@ -570,9 +572,11 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=same_page) as client:
-            with self.assertRaisesRegex(RuntimeError, "duplicate ID"):
-                tuple(client.change_pages())
+        with (
+            NoctaliaClient("noctalia", timeout=10, session=same_page) as client,
+            self.assertRaisesRegex(RuntimeError, "duplicate ID"),
+        ):
+            tuple(client.change_pages())
 
         start = Session(
             get_responses=(
@@ -640,9 +644,11 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=missing) as client:
-            with self.assertRaises(RuntimeError):
-                tuple(client.iter_changes(after="missing"))
+        with (
+            NoctaliaClient("noctalia", timeout=10, session=missing) as client,
+            self.assertRaises(RuntimeError),
+        ):
+            tuple(client.iter_changes(after="missing"))
 
     def test_invalid_inputs_and_inconsistent_responses_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -664,9 +670,11 @@ class ClientTests(unittest.TestCase):
                 },
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
-            with self.assertRaises(RuntimeError):
-                client.translations(DESCRIPTION)
+        with (
+            NoctaliaClient("noctalia", timeout=10, session=session) as client,
+            self.assertRaises(RuntimeError),
+        ):
+            client.translations(DESCRIPTION)
 
     def test_owned_session_retries_a_temporary_server_failure(self) -> None:
         _RetryHandler.attempts = 0
@@ -674,12 +682,14 @@ class ClientTests(unittest.TestCase):
             thread = Thread(target=server.serve_forever)
             thread.start()
             try:
-                with patch(
-                    "noctalia_i18n_core.client._BASE_URL",
-                    f"http://127.0.0.1:{server.server_port}",
+                with (
+                    patch(
+                        "noctalia_i18n_core.client._BASE_URL",
+                        f"http://127.0.0.1:{server.server_port}",
+                    ),
+                    NoctaliaClient("noctalia", timeout=10) as client,
                 ):
-                    with NoctaliaClient("noctalia", timeout=10) as client:
-                        catalog = client.catalog()
+                    catalog = client.catalog()
             finally:
                 server.shutdown()
                 thread.join()

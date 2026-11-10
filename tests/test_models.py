@@ -30,13 +30,13 @@ def _change(
 
 class ChangeTests(unittest.TestCase):
     def test_action_and_values_must_agree(self) -> None:
-        for values in (
-            {"action": "added", "old_value": "old"},
-            {"action": "deleted", "new_value": "new"},
-            {"action": "modified", "old_value": None},
+        for action, old_value, new_value in (
+            ("added", "old", None),
+            ("deleted", None, "new"),
+            ("modified", None, "new"),
         ):
-            with self.subTest(values=values), self.assertRaises(ValueError):
-                replace(_change(), **values)
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                _change(action=action, old_value=old_value, new_value=new_value)
 
     def test_required_fields_and_time_are_validated(self) -> None:
         with self.assertRaises(ValueError):

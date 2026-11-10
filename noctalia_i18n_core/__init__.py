@@ -13,6 +13,7 @@ from .models import (
 )
 
 __all__ = [
+    "SOURCE_LOCALE",
     "Change",
     "ChangeAction",
     "ChangePage",
@@ -21,5 +22,4 @@ __all__ = [
     "NoctaliaClient",
     "Project",
     "Review",
-    "SOURCE_LOCALE",
 ]

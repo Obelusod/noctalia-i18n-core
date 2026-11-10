@@ -24,9 +24,9 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.release.tag_name }}
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.3"
+          version: "0.13.7"
           enable-cache: false
           python-version: "3.12"
       - name: Verify release version
@@ -42,12 +42,12 @@ jobs:
         run: |
           uv run --no-sync ruff format --check .
           uv run --no-sync ruff check .
-          uv run --no-sync basedpyright
+          uv run --no-sync pyrefly check
           uv run --no-sync python -m unittest discover -v
       - name: Build distributions
         run: uv build --no-sources --clear
       - name: Check package metadata
-        run: uvx --from twine==7.0.0 twine check --strict dist/*
+        run: uvx twine check --strict dist/*
       - name: Test wheel
         run: uv run --isolated --no-project --with dist/*.whl tests/smoke_test.py
       - name: Test source distribution

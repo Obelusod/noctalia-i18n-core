@@ -272,10 +272,10 @@ uv sync --locked
 运行格式化、代码检查、类型检查和测试：
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run basedpyright
-uv run python -m unittest discover -v
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked pyrefly check
+uv run --locked python -m unittest discover -v
 ```
 
 默认测试验证数据模型、响应解析和客户端行为，不访问外部服务。
@@ -283,7 +283,7 @@ uv run python -m unittest discover -v
 显式运行在线契约测试，核验所有公开操作与 Noctalia Translate 当前公开项目的实际响应：
 
 ```bash
-uv run python -m unittest tests.live -v
+uv run --locked python -m unittest tests.live -v
 ```
 
 构建并检查 wheel 和源码包：
