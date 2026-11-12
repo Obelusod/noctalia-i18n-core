@@ -1,28 +1,8 @@
 # Noctalia i18n Core
 
-[English](https://github.com/Obelusod/noctalia-i18n-core/blob/main/README.md)
+[English](README.md)
 
-Noctalia i18n Core 是一个只读 Python 客户端，用于读取 [Noctalia Translate](https://i18n.noctalia.dev/) 的项目进度、当前译文和变更记录。存储、调度、投递和应用策略由调用方负责。
-
-## 核心能力
-
-- 读取项目信息、翻译上下文以及项目和各 locale 的翻译进度。
-- 以完整目录、精确键结果或文本搜索结果读取当前译文。
-- 查询指定 locale 的缺失译文和待复核译文。
-- 列出点分隔的翻译键并按层级前缀筛选。
-- 读取指定 locale 中一个或多个键的完整变更记录。
-- 按 locale、时间和锚点边界惰性读取项目级变更流。
-- 读取经过验证且带持久化游标的变更页，支持可恢复的长时间扫描。
-- 重试临时连接故障、超时、限流和服务端错误。
-- 在应用需要配置连接策略时使用调用方管理的 `requests.Session`。
-
-## 项目结构
-
-```text
-noctalia_i18n_core/
-├── client.py   # 网站请求与响应验证
-└── models.py   # 规范化的项目与变更值
-```
+[Noctalia Translate](https://i18n.noctalia.dev/) 的非官方 Python 数据访问库，由开发者独立维护。提供带类型的项目进度、译文、待复核项和修订历史查询。支持直接访问网站，以及通过本机或远程 HTTP 数据服务进行查询和增量读取。
 
 ## 安装
 
@@ -30,254 +10,139 @@ noctalia_i18n_core/
 uv add noctalia-i18n-core
 ```
 
-或使用 pip：
-
 ```bash
 pip install noctalia-i18n-core
 ```
 
-## 使用指南
+要求 Python 3.12 或更新版本。
 
-### 创建客户端
+## 客户端
 
-```python
-from noctalia_i18n_core import NoctaliaClient
+`WebClient` 和 `DataClient` 分别读取网站及数据服务中的项目。两者共享 `project()`、`keys()`、`catalog()`、`translations()`、`search()`、`missing()`、`reviews()`、`changes()` 和 `translation_url()` 的参数与返回约定。
 
-with NoctaliaClient("noctalia", timeout=30) as client:
-    key = "settings.widgets.settings.scroll-repeat.label"
-    value = client.translations(key, locales=("zh-Hans",))[key]["zh-Hans"]
-    changes = client.changes(key, locale="zh-Hans")
+项目标识均为第一个参数，例如 `WebClient("noctalia")` 或 `DataClient("noctalia", url="https://i18n.obelus.cc")`。两者均支持 `timeout=30`、`session=None` 和 `proxy=None`。
 
-    print(value)
-    print(changes[0].occurred_at if changes else "暂无变更")
-```
+网站客户端提供 `iter_changes()`、`change_pages()` 和 `revision_pages()`。数据客户端提供 `history()`、`revision()`、`contributors()`、`status()` 和 `updates()`，查询范围由服务的采集进度决定。
 
-客户端会重试临时故障，并且只关闭由自身创建的 session。需要由应用管理代理或重试策略时，应传入已配置的 `requests.Session`；调用方管理的 session 不会被修改。
-
-### 项目信息与翻译进度
-
-`project()` 执行一次项目请求，返回网站公开的项目名称、说明、翻译上下文和当前进度。项目与 locale 的完成度均为网站显示的整数百分比；待复核数表示英文原文在对应译文最后保存后发生过变更的条目数。
+## 网站查询
 
 ```python
-project = client.project()
+from noctalia_i18n_core import WebClient
 
-print(project.name, project.key_count, project.language_count, project.progress)
-for locale in project.locales:
-    print(
-        locale.code,
-        locale.progress,
-        locale.missing_count,
-        locale.review_count,
+with WebClient("noctalia", timeout=30) as client:
+    project = client.project()
+    translations = client.translations(
+        "bar.annotate.capture-new-region", locales=("en", "zh-Hans")
     )
+    print(project.name, project.progress)
+    print(translations)
 ```
 
-### 当前译文
+`WebClient` 使用网站 URL 中的项目标识，例如 `noctalia` 或 `official-plugins`。查询返回带类型的不可变对象，译文映射采用 `{key: {locale: value}}` 形式，保留空字符串。
 
-`translations()` 每批最多读取 100 个精确键。结果采用键优先结构，并保持请求的键与 locale 顺序。即使所选 locale 均无译文，请求的键仍会保留并对应空映射。
+| 方法 | 用途 |
+| --- | --- |
+| `project()` | 项目信息与各语言进度 |
+| `keys(prefix=None)` | 翻译键，可限定点分层级 |
+| `catalog(locale=None)` | 当前译文导出，可限定一种语言 |
+| `translations(key, *keys, locales=None)` | 精确键的当前译文 |
+| `search(query, search_locale=..., locales=None)` | 搜索键名与指定语言的文本 |
+| `missing(locale, query=None)` | 缺失项及可用的英文原文 |
+| `reviews(locale, query=None)` | 需要复核的译文 |
+| `changes(key, *keys, locale=...)` | 指定键和语言的完整网站历史 |
+| `iter_changes(...)` | 按语言、时间和修订标识惰性读取项目变更 |
+| `change_pages(...)` | 规范化变更分页及原始续读标识 |
+| `revision_pages(...)` | 保留空字符串和空值的网站原始分页 |
 
-指定 `locales` 可减少响应数据；省略时会先请求项目元数据，以选择全部已配置的 locale。多次操作复用同一个客户端可复用连接。
-
-```python
-values = client.translations(
-    "settings.widgets.settings.scroll-repeat.description",
-    "settings.widgets.settings.scroll-repeat.label",
-    locales=("zh-Hans", "en"),
-)
-```
-
-`catalog()` 执行一次完整导出请求并返回 `{key: {locale: value}}`。只有需要全部当前译文时才使用它。
-
-```python
-catalog = client.catalog()
-source_text = catalog["settings.widgets.settings.scroll-repeat.description"]["en"]
-```
-
-### 文本搜索
-
-`search_translations()` 在 `search_locale` 中搜索键和值，遍历全部结果页，再读取匹配键所需的 locale。如果省略 `locales`，结果只包含 `search_locale`。
-
-```python
-matches = client.search_translations(
-    "确认",
-    search_locale="zh-Hans",
-    locales=("zh-Hans", "en"),
-)
-```
-
-### 缺失与待复核译文
-
-`missing()` 返回指定 locale 中未翻译的键及可用的英文原文。`reviews()` 返回译文保存后英文原文发生变化的条目，并包含变更前后的原文与当前译文。两种查询均可使用 `query` 筛选结果。
-
-```python
-missing = client.missing("fr", query="scroll")
-reviews = client.reviews("fr")
-
-for item in missing:
-    print(item.key, item.source, item.translation_url)
-
-for review in reviews:
-    print(
-        review.key,
-        review.old_source,
-        review.new_source,
-        review.translation,
-    )
-```
-
-### 翻译键
-
-`keys()` 执行一次键树请求并返回完整翻译键列表。`prefix` 匹配以点分隔的完整层级，而非任意字符串前缀。
-
-```python
-widget_keys = client.keys(prefix="settings.widgets")
-```
-
-### 指定键的变更
-
-`changes()` 读取一个或多个精确键在指定 locale 中的完整变更记录。返回元组按最新到最旧排列；多个键的结果也按该顺序合并。
-
-```python
-changes = client.changes(
-    "settings.widgets.settings.scroll-repeat.description",
-    locale="zh-Hans",
-)
-for change in changes:
-    print(change.occurred_at, change.action, change.new_value)
-```
-
-### 项目变更流
-
-`iter_changes()` 按网站提供的顺序惰性读取项目级变更流。`since` 和 `until` 是包含边界的带时区时间，并会统一转换为 UTC；`locale` 将结果限制为一种 locale。
+### 历史筛选与分页
 
 ```python
 from datetime import UTC, datetime
 
-recent = client.iter_changes(
-    locale="zh-Hans",
-    since=datetime(2026, 8, 1, tzinfo=UTC),
-)
-for change in recent:
-    print(change.key, change.action)
+with WebClient("noctalia", timeout=30) as client:
+    for change in client.iter_changes(
+        locale="zh-Hans",
+        since=datetime(2026, 1, 1, tzinfo=UTC),
+    ):
+        print(change.key, change.action, change.new_value)
 ```
 
-`after` 是网站变更标识。客户端会在产生结果前确认锚点；锚点不存在时抛出 `RuntimeError`。每次请求完成后，`on_progress` 接收已完成页码和当前总页数。
+`since` 和 `until` 为包含端点、带时区的时间边界。`after` 排除指定原始修订及更早记录。`change_pages()` 和 `revision_pages()` 接受 `start_page`、`cursor`，支持中断后继续扫描。页面移动时会按网站标识定位游标；无法找到游标时抛出 `RuntimeError`。原文语言为英文（`en`），其他语言标识精确匹配。
 
-`change_pages()` 以不可变的 `ChangePage` 返回同一变更流。`start_page` 选择从一开始的页面；`cursor` 是调用方保存的不透明续读位置，客户端会丢弃该位置及其之前的新记录并继续返回更旧的页面。
+### HTTP 会话、超时与代理
+
+`timeout` 默认 30 秒，控制每次尝试的连接和读取超时。默认创建的会话对临时网络故障、限流和服务端错误进行三次退避重试。`proxy` 可指定代理，`proxy=""` 表示直连，省略时沿用环境设置。需要自行管理认证、代理或重试策略时传入 `session`，由调用方关闭该会话。
 
 ```python
-page = next(client.change_pages(start_page=1))
-print(page.number, page.total_pages, page.cursor)
+import requests
+
+with requests.Session() as session:
+    session.trust_env = False
+    with WebClient("noctalia", timeout=30, session=session) as client:
+        print(client.project().name)
 ```
 
-## API 参考
-
-### `NoctaliaClient`
+## 数据服务查询
 
 ```python
-NoctaliaClient(project, *, timeout, session=None)
+from noctalia_i18n_core import DataClient
+
+with DataClient("noctalia", url="https://i18n.obelus.cc") as client:
+    print(client.status())
+    changes = client.history(locale="zh-Hans", action="modified", limit=25)
+    print(client.translations("bar.annotate.capture-new-region"))
 ```
 
-`project` 是网站项目标识。`timeout` 是每次尝试所使用的正有限秒数。默认情况下，临时连接故障、超时、限流和服务端错误会按退避策略重试三次。`session` 可以是调用方管理的 `requests.Session`；客户端会保留其传输策略，也不会将其关闭。
+`DataClient` 连接本机或远程 HTTP(S) 数据服务，按查询返回已采集的数据。服务地址与项目分别指定，例如 `http://127.0.0.1:8088` 和 `noctalia`。采集、数据库存储及 HTTP 服务由 Noctalia i18n Server 管理。
 
-跨多个请求的查询不构成原子快照。
+支持 `project()`、`keys()`、`catalog(locale=None)`、`translations()`、`search()`、`missing()`、`reviews()`、`revision()`、`changes()` 和 `contributors()`。`history()` 按语言、时间、贡献者、动作和精确键筛选，每页最多 1000 条。使用 `before=上一页最后一条记录的 id` 可在新增记录期间稳定向前翻页。
 
-| 成员 | 返回值 |
+### 增量读取
+
+```python
+with DataClient("noctalia", url="http://127.0.0.1:8088") as client:
+    cursor = client.updates().cursor
+    batch = client.updates(cursor)
+    for change in batch.changes:
+        print(change.key, change.new_value)
+    cursor = batch.cursor
+```
+
+`updates()` 返回当前处理位置。传入已保存的游标后，变更按从旧到新排序，返回游标与该批原始记录范围一致。`has_more` 为真时继续读取，处理成功后保存返回游标。没有文本变化的记录也会推进游标，历史回填保留在已有处理位置之前。游标的持久化与应用操作由调用方负责。
+
+客户端按端点保留最近一次响应，通过 ETag 条件请求校验。资源在每个请求中读取一致的已提交视图，跨请求的数据可能更新。`session` 可配置连接策略，外部传入的会话由调用方关闭。
+
+## 返回对象
+
+| 类型 | 契约 |
 | --- | --- |
-| `slug` | 构造函数接收的项目标识 |
-| `translation_url(key, locale)` | 指定键与 locale 的翻译页面 |
-| `project()` | 项目信息与当前翻译进度 `Project` |
-| `keys(*, prefix=None)` | 完整或按前缀筛选的键 `tuple[str, ...]` |
-| `catalog()` | 完整当前目录 `dict[str, dict[str, str]]` |
-| `translations(key, *keys, locales=None)` | 键优先的精确译文 |
-| `search_translations(query, *, search_locale, locales=None)` | 文本匹配键的键优先译文 |
-| `missing(locale, *, query=None)` | 缺失译文及其英文原文 |
-| `reviews(locale, *, query=None)` | 指定 locale 的待复核译文 |
-| `changes(key, *keys, locale)` | 按最新到最旧排列的精确键变更 |
-| `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | 惰性的项目级变更迭代器 |
-| `change_pages(*, locale=None, start_page=1, cursor=None)` | 带不透明续读游标、经过验证的惰性变更页 |
-| `close()` | 关闭由客户端拥有的 HTTP session |
+| `Project`, `Locale` | 项目信息及与网站一致的整数完成百分比 |
+| `Missing`, `Review` | 条目内容、语言和网站编辑地址 |
+| `Revision` | 原始标识、编辑者、前后值和 UTC 时间 |
+| `Change` | 新增、修改或删除，以及可用的英文原文上下文 |
+| `RevisionPage`, `ChangePage` | 页码、总页数、有序记录和续读标识 |
+| `ChangeBatch` | 一致的变更批次、处理游标及后续数据标志 |
+| `CollectionStatus` | 已发布的历史范围、目录大小、采集时间和待发布工作 |
 
-`translations()` 和 `changes()` 至少需要一个位置键参数。`translations()` 即使结果为空也会返回请求的键。`changes()` 返回元组，并为每个请求键访问网站。`iter_changes()` 不接受键参数，只有开始迭代时才会发起请求。
+原始 `Revision` 区分空字符串和空值。规范化的 `Change` 使用 `None` 表示缺失的前后文本，以 `API` 表示未署名编辑。数据服务历史查询会从已采集的译文和修订补全可用的英文上下文，原文删除保留旧英文文本。返回时间均为带时区的 UTC 时间。
 
-无效参数抛出 `ValueError`；重试后仍未恢复的网络故障以及不符合网站契约的响应抛出 `RuntimeError`。
+## 异常与资源管理
 
-### `Project` 与 `Locale`
+无效查询参数抛出 `ValueError`。请求失败、返回数据不符合模型或数据尚未采集时抛出带查询上下文的 `RuntimeError`。使用上下文管理器关闭客户端。
 
-`Project` 包含项目的公开信息和由当前 locale 状态汇总的进度：
-
-| 字段或属性 | 说明 |
-| --- | --- |
-| `slug` | 网站项目标识 |
-| `name` | 项目名称 |
-| `description` | 项目说明；未设置时为 `None` |
-| `translation_context` | 翻译说明与术语约定；未设置时为 `None` |
-| `key_count` | 当前翻译键数 |
-| `locales` | 按网站顺序排列的 `tuple[Locale, ...]` |
-| `language_count` | 已配置 locale 数 |
-| `translation_count` | 当前已有译文总数 |
-| `missing_count` | 当前缺失译文总数 |
-| `review_count` | 当前待复核译文总数 |
-| `progress` | 与网站一致的整数完成百分比 |
-
-每个 `Locale` 包含 `code`、`translation_count`、`missing_count`、`review_count` 和派生的 `progress`。尚无任何译文的 locale 也会包含在项目结果中。
-
-### `Missing` 与 `Review`
-
-`Missing` 包含 `key`、`locale`、`source` 和 `translation_url`。键没有英文译文时，`source` 为 `None`。`Review` 包含 `key`、`locale`、`old_source`、`new_source`、`translation` 和 `translation_url`；网站没有此前原文时，`old_source` 为 `None`。这里的原文差异不代表译文本身的变更记录。
-
-### `Change`
-
-每条变更记录包含以下字段：
-
-| 字段 | 说明 |
-| --- | --- |
-| `id` | 网站变更标识 |
-| `key` | 翻译键 |
-| `locale` | 发生变更的 locale |
-| `action` | `added`、`modified` 或 `deleted` |
-| `actor` | 贡献者登录名；自动变更为 `API` |
-| `old_value` | 变更前文案；新增时为 `None` |
-| `new_value` | 变更后文案；删除时为 `None` |
-| `occurred_at` | 带 UTC 时区的 `datetime` |
-| `translation_url` | 对应键和 locale 的翻译页面 |
-
-`ChangeAction` 是字面量类型 `"added" | "modified" | "deleted"`。`SOURCE_LOCALE` 的值为 `"en"`。
-
-### `ChangePage`
-
-`ChangePage` 包含 `number`、`total_pages`、`changes` 和 `cursor`。`cursor` 对应页面中最后一条原始网站记录，即使该记录没有规范化为 `Change` 也会保留；调用方应将其视为只用于继续读取的不透明值。
+接口参数、返回值和异常参见 [`WebClient`](noctalia_i18n_core/web.py)、[`DataClient`](noctalia_i18n_core/data.py) 和[返回对象](noctalia_i18n_core/models.py)。
 
 ## 开发
 
-安装锁定的开发环境：
-
 ```bash
 uv sync --locked
-```
-
-运行格式化、代码检查、类型检查和测试：
-
-```bash
 uv run --locked ruff format --check .
 uv run --locked ruff check .
 uv run --locked pyrefly check
 uv run --locked python -m unittest discover -v
 ```
 
-默认测试验证数据模型、响应解析和客户端行为，不访问外部服务。
-
-显式运行在线契约测试，核验所有公开操作与 Noctalia Translate 当前公开项目的实际响应：
-
-```bash
-uv run --locked python -m unittest tests.live -v
-```
-
-构建并检查 wheel 和源码包：
-
-```bash
-uv build --no-sources --clear
-uvx twine check --strict dist/*
-```
+在线网站检查通过 `uv run --locked python -m unittest tests.live -v` 显式执行。
 
 ## 许可证
 
