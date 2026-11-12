@@ -1,28 +1,8 @@
 # Noctalia i18n Core
 
-[简体中文](https://github.com/Obelusod/noctalia-i18n-core/blob/main/README.zh-CN.md)
+[简体中文](README.zh-CN.md)
 
-Noctalia i18n Core is a read-only Python client for project progress, current translations, and changes from [Noctalia Translate](https://i18n.noctalia.dev/). Storage, scheduling, delivery, and application policy belong to the caller.
-
-## Capabilities
-
-- Read project details, translation context, and project-wide and per-locale progress.
-- Read current translations as a complete catalog, exact-key results, or text-search results.
-- Query missing translations and translations that need review in a selected locale.
-- List dot-separated translation keys and filter them by hierarchy prefix.
-- Read complete changes for selected keys in one locale.
-- Lazily read the project-wide change stream with locale, time, and anchor boundaries.
-- Read validated change pages with a durable cursor for resumable scans.
-- Retry temporary connection, timeout, rate-limit, and server failures.
-- Use a caller-owned `requests.Session` when connection policy must be configured by the application.
-
-## Project structure
-
-```text
-noctalia_i18n_core/
-├── client.py   # Website requests and response validation
-└── models.py   # Normalized project and change values
-```
+An unofficial, independently maintained Python library for querying translation projects on [Noctalia Translate](https://i18n.noctalia.dev/). Read project progress, translations, review items, and revision history through a website client or HTTP data service.
 
 ## Installation
 
@@ -30,254 +10,139 @@ noctalia_i18n_core/
 uv add noctalia-i18n-core
 ```
 
-Or with pip:
-
 ```bash
 pip install noctalia-i18n-core
 ```
 
-## Usage
+Requires Python 3.12 or later.
 
-### Create a client
+## Clients
 
-```python
-from noctalia_i18n_core import NoctaliaClient
+`WebClient` reads the website, and `DataClient` reads a data service. Both share the parameters and return contracts of `project()`, `keys()`, `catalog()`, `translations()`, `search()`, `missing()`, `reviews()`, `changes()`, and `translation_url()`.
 
-with NoctaliaClient("noctalia", timeout=30) as client:
-    key = "settings.widgets.settings.scroll-repeat.label"
-    value = client.translations(key, locales=("zh-Hans",))[key]["zh-Hans"]
-    changes = client.changes(key, locale="zh-Hans")
+The project identifier is the first argument, for example `WebClient("noctalia")` or `DataClient("noctalia", url="https://i18n.obelus.cc")`. Both accept `timeout=30`, `session=None`, and `proxy=None`.
 
-    print(value)
-    print(changes[0].occurred_at if changes else "No changes")
-```
+The website client additionally provides `iter_changes()`, `change_pages()`, and `revision_pages()`. The data client provides `history()`, `revision()`, `contributors()`, `status()`, and `updates()`. Its query range follows the service's collection progress.
 
-The client retries temporary failures and closes the session it creates. Pass a configured `requests.Session` when the application owns connection settings such as proxies or retry policy; caller-owned sessions are used without modification.
-
-### Project details and progress
-
-`project()` makes one project request and returns the public name, description, translation context, and current progress. Project and locale progress use the integer percentage shown by the website. The review count identifies translations whose English source changed after that translation was last saved.
+## Website queries
 
 ```python
-project = client.project()
+from noctalia_i18n_core import WebClient
 
-print(project.name, project.key_count, project.language_count, project.progress)
-for locale in project.locales:
-    print(
-        locale.code,
-        locale.progress,
-        locale.missing_count,
-        locale.review_count,
+with WebClient("noctalia", timeout=30) as client:
+    project = client.project()
+    translations = client.translations(
+        "bar.annotate.capture-new-region", locales=("en", "zh-Hans")
     )
+    print(project.name, project.progress)
+    print(translations)
 ```
 
-### Current translations
+`WebClient` selects a website project by its URL identifier, such as `noctalia` or `official-plugins`. Query results use typed, immutable values. Translation mappings use `{key: {locale: value}}` form and preserve empty strings.
 
-`translations()` reads exact keys in batches of up to 100. Its key-first result preserves the requested key and locale order. A requested key remains present with an empty mapping when no selected locale has a value.
+| Method | Purpose |
+| --- | --- |
+| `project()` | Project metadata and per-language progress |
+| `keys(prefix=None)` | Keys, optionally restricted to a dot-separated hierarchy |
+| `catalog(locale=None)` | Current translation export, optionally restricted to one language |
+| `translations(key, *keys, locales=None)` | Current translations for exact keys |
+| `search(query, search_locale=..., locales=None)` | Search key names and text in a selected language |
+| `missing(locale, query=None)` | Untranslated entries and available English source text |
+| `reviews(locale, query=None)` | Translations marked as needing review |
+| `changes(key, *keys, locale=...)` | Complete website history for selected keys and language |
+| `iter_changes(...)` | Lazy project-wide changes with language, time, and revision filters |
+| `change_pages(...)` | Normalized pages with raw continuation identifiers |
+| `revision_pages(...)` | Raw website pages, preserving empty and null values |
 
-Specify `locales` to limit response size; omitting it first fetches project metadata to select all configured locales. Reuse one client for connection reuse across calls.
-
-```python
-values = client.translations(
-    "settings.widgets.settings.scroll-repeat.description",
-    "settings.widgets.settings.scroll-repeat.label",
-    locales=("zh-Hans", "en"),
-)
-```
-
-`catalog()` makes one complete export request and returns `{key: {locale: value}}`. It is intended for callers that need every current translation.
-
-```python
-catalog = client.catalog()
-source_text = catalog["settings.widgets.settings.scroll-repeat.description"]["en"]
-```
-
-### Text search
-
-`search_translations()` searches the key and current value in `search_locale`, follows all result pages, and reads the requested result locales for the matching keys. If `locales` is omitted, the result contains only `search_locale`.
-
-```python
-matches = client.search_translations(
-    "确认",
-    search_locale="zh-Hans",
-    locales=("zh-Hans", "en"),
-)
-```
-
-### Missing translations and reviews
-
-`missing()` returns source entries without a current translation in one locale. `reviews()` returns entries whose English source changed after the translation was last saved, including the old and new source text and the current translation. Both queries accept `query` to filter their results.
-
-```python
-missing = client.missing("fr", query="scroll")
-reviews = client.reviews("fr")
-
-for item in missing:
-    print(item.key, item.source, item.translation_url)
-
-for review in reviews:
-    print(
-        review.key,
-        review.old_source,
-        review.new_source,
-        review.translation,
-    )
-```
-
-### Translation keys
-
-`keys()` makes one key-tree request and returns the complete key list. A `prefix` matches a complete dot-separated hierarchy rather than an arbitrary string prefix.
-
-```python
-widget_keys = client.keys(prefix="settings.widgets")
-```
-
-### Changes for selected keys
-
-`changes()` reads the complete changes for one or more exact keys in one locale. The returned tuple is ordered from newest to oldest; multiple key results are merged in that order.
-
-```python
-changes = client.changes(
-    "settings.widgets.settings.scroll-repeat.description",
-    locale="zh-Hans",
-)
-for change in changes:
-    print(change.occurred_at, change.action, change.new_value)
-```
-
-### Project change stream
-
-`iter_changes()` lazily reads the project-wide change stream in the order supplied by the website. `since` and `until` are inclusive, timezone-aware boundaries and are normalized to UTC. `locale` restricts the stream to one locale.
+### History filters and pagination
 
 ```python
 from datetime import UTC, datetime
 
-recent = client.iter_changes(
-    locale="zh-Hans",
-    since=datetime(2026, 8, 1, tzinfo=UTC),
-)
-for change in recent:
-    print(change.key, change.action)
+with WebClient("noctalia", timeout=30) as client:
+    for change in client.iter_changes(
+        locale="zh-Hans",
+        since=datetime(2026, 1, 1, tzinfo=UTC),
+    ):
+        print(change.key, change.action, change.new_value)
 ```
 
-`after` is a website change ID. The client confirms the anchor before yielding a result and raises `RuntimeError` when it is absent. `on_progress` receives the completed page number and current total page count after each request.
+`since` and `until` are inclusive, timezone-aware bounds. `after` excludes the selected raw revision and all older records. `change_pages()` and `revision_pages()` accept `start_page` and `cursor` for resumable scans. A cursor follows website identifiers as pages shift; an unavailable cursor raises `RuntimeError`. Source language is English (`en`), and other locale identifiers are matched exactly.
 
-`change_pages()` exposes the same stream as immutable `ChangePage` values. `start_page` selects a one-based page. `cursor` is an opaque resume position stored by the caller; the client discards that position and newer records before continuing with older pages.
+### HTTP sessions, timeouts, and proxies
+
+`timeout=30` sets the connection and read timeout for each attempt. Internally created sessions retry transient transport failures, rate limits, and server errors three times with backoff. `proxy` selects a proxy, `proxy=""` connects directly, and an omitted proxy retains environment settings. Supply `session` to own authentication, proxies, or retry behavior. Caller-owned sessions are closed by the caller.
 
 ```python
-page = next(client.change_pages(start_page=1))
-print(page.number, page.total_pages, page.cursor)
+import requests
+
+with requests.Session() as session:
+    session.trust_env = False
+    with WebClient("noctalia", timeout=30, session=session) as client:
+        print(client.project().name)
 ```
 
-## API reference
-
-### `NoctaliaClient`
+## Data service queries
 
 ```python
-NoctaliaClient(project, *, timeout, session=None)
+from noctalia_i18n_core import DataClient
+
+with DataClient("noctalia", url="https://i18n.obelus.cc") as client:
+    print(client.status())
+    changes = client.history(locale="zh-Hans", action="modified", limit=25)
+    print(client.translations("bar.annotate.capture-new-region"))
 ```
 
-`project` is the website project identifier. `timeout` is a positive finite number of seconds applied to each attempt. By default, temporary connection, timeout, rate-limit, and server failures are retried three times with backoff. `session` may be a caller-owned `requests.Session`; its transport policy is preserved and the client does not close it.
+`DataClient` queries collected data over HTTP(S), using the same interface for localhost and remote deployments. Select the service address and project separately, for example `http://127.0.0.1:8088` and `noctalia`. Noctalia i18n Server owns collection, database storage, and HTTP serving.
 
-Queries spanning multiple requests are not atomic snapshots.
+Available methods include `project()`, `keys()`, `catalog(locale=None)`, `translations()`, `search()`, `missing()`, `reviews()`, `revision()`, `changes()`, and `contributors()`. `history()` filters by language, time, actor, action, and exact keys, with at most 1000 entries per page. Use `before=previous_page[-1].id` for stable pagination while new records arrive.
 
-| Member | Result |
+### Incremental reads
+
+```python
+with DataClient("noctalia", url="http://127.0.0.1:8088") as client:
+    cursor = client.updates().cursor
+    batch = client.updates(cursor)
+    for change in batch.changes:
+        print(change.key, change.new_value)
+    cursor = batch.cursor
+```
+
+`updates()` establishes the current processing position. Passing a saved cursor returns oldest-first changes and the matching raw-record position. Continue while `has_more` is true, and save the returned cursor after processing succeeds. Records without text changes also advance the cursor. Historical backfill precedes existing positions. The caller owns cursor persistence and application operations.
+
+The client retains the last response per endpoint and revalidates it through ETags. Each request reads a consistent committed view; data can change between requests. Use `session` to configure connection policy. Supplied sessions remain owned by the caller.
+
+## Returned values
+
+| Type | Contract |
 | --- | --- |
-| `slug` | The project identifier passed to the constructor |
-| `translation_url(key, locale)` | Translation page for one key and locale |
-| `project()` | `Project` details and current translation progress |
-| `keys(*, prefix=None)` | `tuple[str, ...]` of complete or prefix-matched keys |
-| `catalog()` | `dict[str, dict[str, str]]` containing the complete current catalog |
-| `translations(key, *keys, locales=None)` | Key-first exact translations |
-| `search_translations(query, *, search_locale, locales=None)` | Key-first translations for text matches |
-| `missing(locale, *, query=None)` | Missing translations with their source text |
-| `reviews(locale, *, query=None)` | Translations needing review in one locale |
-| `changes(key, *keys, locale)` | Newest-first exact-key changes |
-| `iter_changes(*, locale=None, since=None, until=None, after=None, on_progress=None)` | Lazy project-wide change iterator |
-| `change_pages(*, locale=None, start_page=1, cursor=None)` | Lazy validated pages with an opaque resume cursor |
-| `close()` | Closes an owned HTTP session |
+| `Project`, `Locale` | Project metadata and integer completion percentages matching the website |
+| `Missing`, `Review` | Entry text, language, and website editor URL |
+| `Revision` | Raw identifier, actor, old/new values, and UTC timestamp |
+| `Change` | Added, modified, or deleted text with optional English source context |
+| `RevisionPage`, `ChangePage` | Page number, total pages, ordered records, and continuation identifier |
+| `ChangeBatch` | Consistent change batch, processing cursor, and continuation flag |
+| `CollectionStatus` | Published history range, catalog size, collection times, and pending work |
 
-`translations()` and `changes()` require at least one positional key. `translations()` returns requested keys even when their result is empty. `changes()` returns a tuple and requests each selected key from the website. `iter_changes()` never accepts keys and remains lazy until iteration begins.
+Raw `Revision` values distinguish empty strings from nulls. Normalized `Change` values use `None` for absent old/new text and `API` for an unattributed actor. Data service history supplements available English context from collected translations and revisions. Source deletions retain the old English text. All returned timestamps are timezone-aware UTC values.
 
-Invalid arguments raise `ValueError`. Network failures that remain after retries and responses that do not match the website contract raise `RuntimeError`.
+## Errors and resource ownership
 
-### `Project` and `Locale`
+Invalid query arguments raise `ValueError`. Transport failures, invalid responses, and unavailable collected data raise `RuntimeError` with query context. Use context managers to close clients.
 
-`Project` contains public project details and progress aggregated from the current locale states:
-
-| Field or property | Description |
-| --- | --- |
-| `slug` | Website project identifier |
-| `name` | Project name |
-| `description` | Project description, or `None` when absent |
-| `translation_context` | Translation guidance and terminology, or `None` when absent |
-| `key_count` | Current translation key count |
-| `locales` | Website-ordered `tuple[Locale, ...]` |
-| `language_count` | Configured locale count |
-| `translation_count` | Current translation count |
-| `missing_count` | Current missing translation count |
-| `review_count` | Current translations that need review |
-| `progress` | Integer completion percentage shown by the website |
-
-Each `Locale` contains `code`, `translation_count`, `missing_count`, `review_count`, and the derived `progress`. Locales without any current translations remain present in the project result.
-
-### `Missing` and `Review`
-
-`Missing` contains `key`, `locale`, `source`, and `translation_url`. `source` is `None` when the key has no English translation. `Review` contains `key`, `locale`, `old_source`, `new_source`, `translation`, and `translation_url`; `old_source` is `None` when the website has no earlier source text. The source difference is distinct from changes to the translation itself.
-
-### `Change`
-
-Each change has the following fields:
-
-| Field | Description |
-| --- | --- |
-| `id` | Website change identifier |
-| `key` | Translation key |
-| `locale` | Locale changed by the record |
-| `action` | `added`, `modified`, or `deleted` |
-| `actor` | Contributor login, or `API` for an automated change |
-| `old_value` | Previous text, or `None` for an addition |
-| `new_value` | New text, or `None` for a deletion |
-| `occurred_at` | UTC-aware `datetime` |
-| `translation_url` | Translation page for the key and locale |
-
-`ChangeAction` is the literal type `"added" | "modified" | "deleted"`. `SOURCE_LOCALE` is `"en"`.
-
-### `ChangePage`
-
-`ChangePage` contains `number`, `total_pages`, `changes`, and `cursor`. `cursor` corresponds to the final raw website record on the page, including a record that normalizes to no `Change`; callers should treat it only as an opaque resume value.
+API parameters, return values, and exceptions are documented on [`WebClient`](noctalia_i18n_core/web.py), [`DataClient`](noctalia_i18n_core/data.py), and the [returned values](noctalia_i18n_core/models.py).
 
 ## Development
 
-Install the locked development environment:
-
 ```bash
 uv sync --locked
-```
-
-Run formatting, linting, type checking, and tests:
-
-```bash
 uv run --locked ruff format --check .
 uv run --locked ruff check .
 uv run --locked pyrefly check
 uv run --locked python -m unittest discover -v
 ```
 
-The default suite validates models, response parsing, and client behavior without accessing external services.
-
-Run the live contract tests explicitly to verify every public operation against the current public projects on Noctalia Translate:
-
-```bash
-uv run --locked python -m unittest tests.live -v
-```
-
-Build and inspect both distributions:
-
-```bash
-uv build --no-sources --clear
-uvx twine check --strict dist/*
-```
+Run live website checks explicitly with `uv run --locked python -m unittest tests.live -v`.
 
 ## License
 
