@@ -9,7 +9,9 @@ from threading import Thread
 from typing import ClassVar, override
 from unittest.mock import patch
 
-from noctalia_i18n_core import NoctaliaClient
+import requests
+
+from noctalia_i18n_core import WebClient
 
 from .fixtures import JsonValue, Session, changes_page, indexed_page, translation_record
 
@@ -51,7 +53,7 @@ class _RetryHandler(BaseHTTPRequestHandler):
         pass
 
 
-class ClientTests(unittest.TestCase):
+class WebClientTests(unittest.TestCase):
     def test_project_metadata_and_complete_catalog(self) -> None:
         session = Session(
             get_responses=(
@@ -93,7 +95,7 @@ class ClientTests(unittest.TestCase):
                 },
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             project = client.project()
             self.assertEqual(client.slug, "noctalia")
             self.assertEqual(project.name, "Noctalia v5")
@@ -129,7 +131,7 @@ class ClientTests(unittest.TestCase):
                 },
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             result = client.translations(
                 DESCRIPTION,
                 LABEL,
@@ -163,7 +165,7 @@ class ClientTests(unittest.TestCase):
         session = Session(
             post_responses=(response(keys[:100]), response(keys[100:])),
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             result = client.translations(keys[0], *keys[1:], locales=("en",))
 
         self.assertEqual(tuple(result), keys)
@@ -174,6 +176,26 @@ class ClientTests(unittest.TestCase):
                 {"keys": list(keys[100:]), "locales": ["en"]},
             ],
         )
+
+    def test_translations_preserve_empty_and_whitespace_text(self) -> None:
+        key = "settings.idle.behavior.resume-command-placeholder"
+        session = Session(
+            post_responses=(
+                {
+                    "translations": {
+                        key: {
+                            "cs": translation_record(key, "cs", ""),
+                            "en": translation_record(key, "en", " "),
+                        }
+                    }
+                },
+            )
+        )
+        with WebClient("noctalia", session=session) as client:
+            self.assertEqual(
+                client.translations(key, locales=("cs", "en")),
+                {key: {"cs": "", "en": " "}},
+            )
 
     def test_translations_without_locales_fetches_configured_languages(self) -> None:
         session = Session(
@@ -204,7 +226,7 @@ class ClientTests(unittest.TestCase):
                 },
             ),
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             result = client.translations(LABEL)
         self.assertEqual(result, {LABEL: {"en": LABEL_EN, "zh-Hans": LABEL_ZH}})
         self.assertEqual(
@@ -253,8 +275,8 @@ class ClientTests(unittest.TestCase):
                 },
             ),
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
-            result = client.search_translations(
+        with WebClient("noctalia", timeout=10, session=session) as client:
+            result = client.search(
                 "滚动",
                 search_locale="zh-Hans",
                 locales=("en", "zh-Hans"),
@@ -302,7 +324,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             self.assertEqual(
                 client.keys(prefix="settings.widgets.settings.scroll-repeat"),
                 (DESCRIPTION, LABEL),
@@ -357,7 +379,7 @@ class ClientTests(unittest.TestCase):
                 },
             ),
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             missing = client.missing("fr", query="scroll")
             reviews = client.reviews("fr")
 
@@ -396,7 +418,7 @@ class ClientTests(unittest.TestCase):
                 {"en": source, "fr": {keys[0]: "Texte"}},
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             missing = client.missing("de")
         self.assertEqual(tuple(item.key for item in missing), keys)
         self.assertIsNone(missing[0].source)
@@ -404,9 +426,10 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(session.get_calls), 2)
         self.assertEqual(session.post_calls, [])
 
-    def test_large_lookup_rejects_blank_text_as_a_response_error(self) -> None:
+    def test_large_missing_lookup_preserves_empty_and_whitespace_source(self) -> None:
         keys = tuple(f"key-{index}" for index in range(2001))
         source = {key: key for key in keys}
+        source[keys[0]] = ""
         source[keys[-1]] = " "
         session = Session(
             get_responses=(
@@ -414,11 +437,10 @@ class ClientTests(unittest.TestCase):
                 {"en": source},
             )
         )
-        with (
-            NoctaliaClient("noctalia", timeout=10, session=session) as client,
-            self.assertRaisesRegex(RuntimeError, "not a non-empty string"),
-        ):
-            client.missing("fr")
+        with WebClient("noctalia", timeout=10, session=session) as client:
+            missing = client.missing("fr")
+        self.assertEqual(missing[0].source, "")
+        self.assertEqual(missing[-1].source, " ")
 
     def test_large_review_query_uses_one_export_for_current_values(self) -> None:
         keys = tuple(f"key-{index}" for index in range(2001))
@@ -436,7 +458,7 @@ class ClientTests(unittest.TestCase):
                 },
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             reviews = client.reviews("fr")
         self.assertEqual(tuple(item.key for item in reviews), keys)
         self.assertEqual(reviews[-1].translation, f"fr-{keys[-1]}")
@@ -464,7 +486,7 @@ class ClientTests(unittest.TestCase):
         assert isinstance(values, list) and isinstance(values[0], dict)
         values[0]["unrelated"] = -1
         session = Session(get_responses=(payload,))
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             self.assertEqual(client.project().key_count, 0)
 
     def test_changes_merge_keys_newest_first(self) -> None:
@@ -490,7 +512,7 @@ class ClientTests(unittest.TestCase):
                 {"history": [record(LABEL, "2", 2_000, None)]},
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             result = client.changes(DESCRIPTION, LABEL, locale="zh-Hans")
         self.assertEqual([change.id for change in result], ["2", "1"])
         self.assertEqual([change.actor for change in result], ["API", "editor"])
@@ -526,7 +548,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        client = NoctaliaClient("noctalia", timeout=10, session=session)
+        client = WebClient("noctalia", timeout=10, session=session)
         iterator = client.iter_changes(since=datetime.fromtimestamp(1.5, UTC))
         self.assertEqual(len(session.get_calls), 0)
         self.assertEqual(next(iterator).id, "2")
@@ -575,7 +597,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             pages = tuple(client.change_pages(cursor="2"))
         self.assertEqual([page.number for page in pages], [1, 2])
         self.assertEqual([change.id for change in pages[0].changes], [])
@@ -600,7 +622,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=empty) as client:
+        with WebClient("noctalia", timeout=10, session=empty) as client:
             page = next(client.change_pages(locale="zh-Hans"))
         self.assertEqual(page.changes, ())
         self.assertEqual(page.cursor, "empty")
@@ -611,11 +633,11 @@ class ClientTests(unittest.TestCase):
 
     def test_change_pages_validate_start_anchor_and_skip_page_overlap(self) -> None:
         with self.assertRaises(ValueError):
-            NoctaliaClient("noctalia", timeout=10).change_pages(start_page=0)
+            WebClient("noctalia", timeout=10).change_pages(start_page=0)
 
         missing = Session(get_responses=(changes_page(page=1, total_pages=1),))
         with (
-            NoctaliaClient("noctalia", timeout=10, session=missing) as client,
+            WebClient("noctalia", timeout=10, session=missing) as client,
             self.assertRaises(RuntimeError),
         ):
             tuple(client.change_pages(cursor="missing"))
@@ -659,7 +681,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=duplicate) as client:
+        with WebClient("noctalia", timeout=10, session=duplicate) as client:
             pages = tuple(client.change_pages())
         self.assertEqual(
             [[change.id for change in page.changes] for page in pages],
@@ -693,7 +715,7 @@ class ClientTests(unittest.TestCase):
             )
         )
         with (
-            NoctaliaClient("noctalia", timeout=10, session=same_page) as client,
+            WebClient("noctalia", timeout=10, session=same_page) as client,
             self.assertRaisesRegex(RuntimeError, "duplicate ID"),
         ):
             tuple(client.change_pages())
@@ -715,7 +737,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=start) as client:
+        with WebClient("noctalia", timeout=10, session=start) as client:
             pages = tuple(client.change_pages(start_page=2))
         self.assertEqual([page.number for page in pages], [2])
 
@@ -744,7 +766,7 @@ class ClientTests(unittest.TestCase):
                 ),
             )
         )
-        with NoctaliaClient("noctalia", timeout=10, session=session) as client:
+        with WebClient("noctalia", timeout=10, session=session) as client:
             self.assertEqual(
                 [change.id for change in client.iter_changes(after="2")], ["3"]
             )
@@ -765,18 +787,35 @@ class ClientTests(unittest.TestCase):
             )
         )
         with (
-            NoctaliaClient("noctalia", timeout=10, session=missing) as client,
+            WebClient("noctalia", timeout=10, session=missing) as client,
             self.assertRaises(RuntimeError),
         ):
-            tuple(client.iter_changes(after="missing"))
+            next(client.iter_changes(after="missing"))
+
+    def test_empty_revision_in_the_middle_of_a_page_is_a_valid_anchor(self) -> None:
+        session = Session(
+            get_responses=(
+                changes_page(
+                    ("3", LABEL, "en", None, 3_000, "Old", "New"),
+                    ("empty", LABEL, "en", None, 2_000, "", ""),
+                    ("1", LABEL, "en", None, 1_000, None, "Old"),
+                    total_pages=2,
+                ),
+            )
+        )
+        with WebClient("noctalia", session=session) as client:
+            self.assertEqual(
+                [change.id for change in client.iter_changes(after="empty")], ["3"]
+            )
+        self.assertEqual(len(session.get_calls), 1)
 
     def test_invalid_inputs_and_inconsistent_responses_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            NoctaliaClient("", timeout=10)
+            WebClient("", timeout=10)
         with self.assertRaises(ValueError):
-            NoctaliaClient("noctalia", timeout=0)
+            WebClient("noctalia", timeout=0)
         with self.assertRaises(ValueError):
-            NoctaliaClient("noctalia", timeout=10, session=Session()).iter_changes(
+            WebClient("noctalia", timeout=10, session=Session()).iter_changes(
                 since=datetime(2026, 1, 1)
             )
         session = Session(
@@ -791,10 +830,36 @@ class ClientTests(unittest.TestCase):
             )
         )
         with (
-            NoctaliaClient("noctalia", timeout=10, session=session) as client,
+            WebClient("noctalia", timeout=10, session=session) as client,
             self.assertRaises(RuntimeError),
         ):
             client.translations(DESCRIPTION, locales=("en",))
+
+    def test_malformed_json_and_out_of_range_timestamps_report_response_errors(
+        self,
+    ) -> None:
+        for body in (b"{", b'{"value":NaN}', b'{"value":1e999}'):
+            response = requests.Response()
+            response.status_code = 200
+            response._content = body
+            session = Session(get_responses=(response,))
+            with (
+                self.subTest(body=body),
+                WebClient("noctalia", session=session) as client,
+                self.assertRaisesRegex(RuntimeError, "not valid JSON"),
+            ):
+                client.catalog()
+
+        session = Session(
+            get_responses=(
+                changes_page(("1", LABEL, "en", None, 10**18, "Old", "New")),
+            )
+        )
+        with (
+            WebClient("noctalia", session=session) as client,
+            self.assertRaisesRegex(RuntimeError, "created_at is out of range"),
+        ):
+            next(client.revision_pages())
 
     def test_owned_session_retries_a_temporary_server_failure(self) -> None:
         _RetryHandler.attempts = 0
@@ -804,10 +869,10 @@ class ClientTests(unittest.TestCase):
             try:
                 with (
                     patch(
-                        "noctalia_i18n_core.client._BASE_URL",
+                        "noctalia_i18n_core.web._BASE_URL",
                         f"http://127.0.0.1:{server.server_port}",
                     ),
-                    NoctaliaClient("noctalia", timeout=10) as client,
+                    WebClient("noctalia", timeout=10) as client,
                 ):
                     catalog = client.catalog()
             finally:
@@ -820,12 +885,12 @@ class ClientTests(unittest.TestCase):
     def test_session_ownership_is_respected(self) -> None:
         external = Session()
         adapter = external.get_adapter("https://")
-        NoctaliaClient("noctalia", timeout=10, session=external).close()
+        WebClient("noctalia", timeout=10, session=external).close()
         self.assertFalse(external.closed_by_client)
         self.assertIs(external.get_adapter("https://"), adapter)
 
         owned = Session()
-        with patch("noctalia_i18n_core.client.requests.Session", return_value=owned):
-            client = NoctaliaClient("noctalia", timeout=10)
+        with patch("noctalia_i18n_core.http.requests.Session", return_value=owned):
+            client = WebClient("noctalia", timeout=10)
         client.close()
         self.assertTrue(owned.closed_by_client)

@@ -2,87 +2,37 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import batched, pairwise
-from types import TracebackType
-from typing import Self, TypeGuard
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
+import msgspec
 import requests
-from requests.adapters import HTTPAdapter, Retry
 
+from .http import HttpClient, _keys, _locales
 from .models import (
+    _BASE_URL,
     SOURCE_LOCALE,
     Change,
-    ChangeAction,
     ChangePage,
     Locale,
     Missing,
     Project,
     Review,
+    Revision,
+    RevisionPage,
+    _text,
+    _utc,
 )
 
-_BASE_URL = "https://i18n.noctalia.dev"
-_RETRYABLE_METHODS = frozenset({"GET", "POST"})
-_RETRYABLE_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _TRANSLATION_BATCH_SIZE = 100
 _CATALOG_LOOKUP_THRESHOLD = 2000
 type _JsonValue = (
     None | bool | int | float | str | list[_JsonValue] | dict[str, _JsonValue]
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _ParsedChangePage:
-    number: int
-    total_pages: int
-    records: tuple[tuple[str, datetime, Change | None], ...]
-
-    @property
-    def cursor(self) -> str | None:
-        return self.records[-1][0] if self.records else None
-
-    def to_page(
-        self, records: tuple[tuple[str, datetime, Change | None], ...]
-    ) -> ChangePage:
-        return ChangePage(
-            number=self.number,
-            total_pages=self.total_pages,
-            changes=tuple(change for _, _, change in records if change is not None),
-            cursor=self.cursor,
-        )
-
-
-def _is_list(value: object) -> TypeGuard[list[object]]:
-    return isinstance(value, list)
-
-
-def _is_dict(value: object) -> TypeGuard[dict[object, object]]:
-    return isinstance(value, dict)
-
-
-def _normalize(value: object, label: str) -> _JsonValue:
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError(f"{label} contains a non-finite number")
-        return value
-    if _is_list(value):
-        return [
-            _normalize(item, f"{label}[{index}]") for index, item in enumerate(value)
-        ]
-    if _is_dict(value):
-        output: dict[str, _JsonValue] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise ValueError(f"{label} must use string mapping keys")
-            output[key] = _normalize(item, f"{label}.{key}")
-        return output
-    raise ValueError(f"{label} contains a non-JSON value")
+_JSON_DECODER: msgspec.json.Decoder[_JsonValue] = msgspec.json.Decoder()
 
 
 def _object(value: _JsonValue, label: str) -> dict[str, _JsonValue]:
@@ -112,9 +62,10 @@ def _reference(
     return values[reference]
 
 
-def _string(value: _JsonValue, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise RuntimeError(f"{label} is not a non-empty string")
+def _string(value: _JsonValue, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        expected = "a string" if allow_empty else "a non-empty string"
+        raise RuntimeError(f"{label} is not {expected}")
     return value
 
 
@@ -130,106 +81,34 @@ def _integer(value: _JsonValue, label: str, *, minimum: int) -> int:
     return value
 
 
-def _boundary(value: object, label: str) -> datetime:
-    if not isinstance(value, datetime) or value.utcoffset() is None:
-        raise ValueError(f"{label} must include a timezone")
-    return value.astimezone(UTC)
-
-
-def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} must be a non-empty string")
-    return value
-
-
-def _keys(values: tuple[object, ...], label: str) -> tuple[str, ...]:
-    validated = (_text(value, f"{label} item") for value in values)
-    return tuple(dict.fromkeys(validated))
-
-
-def _locales(value: Iterable[str] | None, label: str) -> tuple[str, ...] | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        raise ValueError(f"{label} must be an iterable of locale identifiers")
-    selected = tuple(dict.fromkeys(_text(locale, f"{label} item") for locale in value))
-    if not selected:
-        raise ValueError(f"{label} must not be empty")
-    return selected
-
-
 def _timestamp(value: _JsonValue, label: str) -> datetime:
     milliseconds = _integer(value, f"{label} created_at", minimum=0)
     try:
         seconds, remainder = divmod(milliseconds, 1000)
         return datetime.fromtimestamp(seconds, UTC) + timedelta(milliseconds=remainder)
-    except (OSError, OverflowError) as exc:
+    except (OSError, OverflowError, ValueError) as exc:
         raise RuntimeError(f"{label} created_at is out of range") from exc
 
 
-def _change_values(
-    old_value: str | None, new_value: str | None
-) -> tuple[ChangeAction, str | None, str | None] | None:
-    if old_value in {None, ""}:
-        return None if not new_value else ("added", None, new_value)
-    if new_value in {None, ""}:
-        return "deleted", old_value, None
-    return "modified", old_value, new_value
-
-
-def _translation_url(project: str, key: str, locale: str) -> str:
-    return (
-        f"{_BASE_URL}/projects/{quote(project, safe='')}/translate?"
-        f"{urlencode({'search': key, 'locale': locale})}"
-    )
-
-
-def _change(
-    *,
-    project: str,
-    change_id: str,
-    key: str,
-    locale: str,
-    actor: str,
-    old_value: str | None,
-    new_value: str | None,
-    occurred_at: datetime,
-    label: str,
-) -> Change | None:
-    values = _change_values(old_value, new_value)
-    if values is None:
-        return None
-    action, old_value, new_value = values
+def _revision(record: dict[str, _JsonValue], label: str) -> Revision:
     try:
-        return Change(
-            id=change_id,
-            key=key,
-            locale=locale,
-            action=action,
-            actor=actor,
-            old_value=old_value,
-            new_value=new_value,
-            occurred_at=occurred_at,
-            translation_url=_translation_url(project, key, locale),
+        return Revision(
+            id=_string(_member(record, "id", label), f"{label} ID"),
+            key=_string(_member(record, "translation_key", label), f"{label} key"),
+            locale=_string(_member(record, "locale", label), f"{label} locale"),
+            actor=_optional_string(
+                _member(record, "created_by_login", label), f"{label} actor"
+            ),
+            old_value=_optional_string(
+                _member(record, "text", label), f"{label} old value"
+            ),
+            new_value=_optional_string(
+                _member(record, "new_text", label), f"{label} new value"
+            ),
+            occurred_at=_timestamp(_member(record, "created_at", label), label),
         )
     except ValueError as exc:
         raise RuntimeError(f"{label} is invalid: {exc}") from exc
-
-
-def _create_session() -> requests.Session:
-    session = requests.Session()
-    adapter = HTTPAdapter(
-        max_retries=Retry(
-            total=3,
-            allowed_methods=_RETRYABLE_METHODS,
-            status_forcelist=_RETRYABLE_STATUSES,
-            backoff_factor=0.5,
-            raise_on_status=False,
-        )
-    )
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
 
 
 def _request_json(
@@ -257,8 +136,8 @@ def _request_json(
                 timeout=timeout,
             )
         response.raise_for_status()
-        raw: object = response.json()
-    except ValueError as exc:
+        return _JSON_DECODER.decode(response.content)
+    except msgspec.DecodeError as exc:
         raise RuntimeError(f"{resource} is not valid JSON") from exc
     except requests.RequestException as exc:
         response = exc.response
@@ -271,10 +150,6 @@ def _request_json(
         else:
             detail = "network failure"
         raise RuntimeError(f"Cannot retrieve {resource}: {detail}") from exc
-    try:
-        return _normalize(raw, resource)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
 
 
 def _page_values(payload: _JsonValue, resource: str) -> list[_JsonValue]:
@@ -364,19 +239,13 @@ def _parse_project(payload: _JsonValue, project: str) -> Project:
         _member(root, "outdatedByLocale", resource), f"{resource} review counts"
     )
     locales: list[Locale] = []
-    codes: set[str] = set()
     for index, item in enumerate(values):
         code = _string(item, f"Project locale {index}")
-        if code in codes:
-            raise RuntimeError(f"Project metadata contains duplicate locale {code!r}")
-        codes.add(code)
         missing_count = _integer(
             _member(missing, code, resource),
             f"{resource} {code!r} missing count",
             minimum=0,
         )
-        if missing_count > key_count:
-            raise RuntimeError(f"{resource} {code!r} missing count exceeds key count")
         review_count = _integer(
             review.get(code, 0), f"{resource} {code!r} review count", minimum=0
         )
@@ -483,12 +352,13 @@ def _parse_translations(
     root = _object(payload, resource)
     records = _object(_member(root, "translations", resource), resource)
     output: dict[str, dict[str, str]] = {key: {} for key in requested_keys}
+    languages = frozenset(selected_locales)
     for key, values in records.items():
         if key not in output:
             raise RuntimeError(f"Translations contains unexpected key {key!r}")
         locale_records = _object(values, f"Translation {key!r}")
         for locale, value in locale_records.items():
-            if locale not in selected_locales:
+            if locale not in languages:
                 raise RuntimeError(
                     f"Translation {key!r} contains unexpected locale {locale!r}"
                 )
@@ -502,7 +372,9 @@ def _parse_translations(
             )
             if returned_key != key or returned_locale != locale:
                 raise RuntimeError(f"{label} contains inconsistent identifiers")
-            text = _string(_member(record, "text", label), f"{label} text")
+            text = _string(
+                _member(record, "text", label), f"{label} text", allow_empty=True
+            )
             output[key][locale] = text
     return {
         key: {
@@ -587,7 +459,11 @@ def _parse_review_sources(
                 key,
                 _optional_string(_member(record, "enOld", label), f"{label} old source")
                 or None,
-                _string(_member(record, "enNew", label), f"{label} new source"),
+                _string(
+                    _member(record, "enNew", label),
+                    f"{label} new source",
+                    allow_empty=True,
+                ),
             )
         )
     count = _integer(_member(root, "count", resource), f"{resource} count", minimum=0)
@@ -607,37 +483,18 @@ def _parse_changes(
     identifiers: set[str] = set()
     for index, item in enumerate(records):
         label = f"{resource} record {index}"
-        record = _object(item, label)
-        change_id = _string(_member(record, "id", label), f"{label} ID")
-        if change_id in identifiers:
-            raise RuntimeError(f"{resource} contains duplicate ID {change_id!r}")
-        identifiers.add(change_id)
-        record_key = _string(_member(record, "translation_key", label), f"{label} key")
-        if record_key != key:
+        revision = _revision(_object(item, label), label)
+        if revision.id in identifiers:
+            raise RuntimeError(f"{resource} contains duplicate ID {revision.id!r}")
+        identifiers.add(revision.id)
+        if revision.key != key:
             raise RuntimeError(f"{label} belongs to another key")
-        record_locale = _string(_member(record, "locale", label), f"{label} locale")
-        if record_locale != locale:
+        if revision.locale != locale:
             raise RuntimeError(f"{label} belongs to another locale")
-        change = _change(
-            project=project,
-            change_id=change_id,
-            key=record_key,
-            locale=record_locale,
-            actor=(
-                _optional_string(
-                    _member(record, "created_by_login", label), f"{label} actor"
-                )
-                or "API"
-            ),
-            old_value=_optional_string(
-                _member(record, "text", label), f"{label} old value"
-            ),
-            new_value=_optional_string(
-                _member(record, "new_text", label), f"{label} new value"
-            ),
-            occurred_at=_timestamp(_member(record, "created_at", label), label),
-            label=label,
-        )
+        try:
+            change = revision.change(project)
+        except ValueError as exc:
+            raise RuntimeError(f"{label} is invalid: {exc}") from exc
         if change is not None:
             output.append(change)
     if any(newer.occurred_at < older.occurred_at for newer, older in pairwise(output)):
@@ -645,9 +502,9 @@ def _parse_changes(
     return tuple(output)
 
 
-def _parse_change_page(
+def _parse_revision_page(
     payload: _JsonValue, project: str, locale_filter: str | None
-) -> _ParsedChangePage:
+) -> RevisionPage:
     resource = "Recent Changes"
     root = _page_object(
         payload,
@@ -678,68 +535,54 @@ def _parse_change_page(
         minimum=0,
     )
     records = _array(_member(root, "recentChanges", resource), f"{resource} records")
-    output: list[tuple[str, datetime, Change | None]] = []
-    identifiers: set[str] = set()
+    output: list[Revision] = []
     for index, item in enumerate(records):
         label = f"{resource} record {index}"
         record = _object(item, label)
-        change_id = _string(_member(record, "id", label), f"{label} ID")
-        if change_id in identifiers:
-            raise RuntimeError(f"{resource} contains duplicate ID {change_id!r}")
-        identifiers.add(change_id)
         if _member(record, "project_id", label) != project_id:
             raise RuntimeError(f"{label} belongs to another project")
-        key = _string(_member(record, "translation_key", label), f"{label} key")
-        record_locale = _string(_member(record, "locale", label), f"{label} locale")
-        if locale_filter is not None and record_locale != locale_filter:
+        revision = _revision(record, label)
+        if locale_filter is not None and revision.locale != locale_filter:
             raise RuntimeError(f"{label} belongs to another locale")
-        actor = _optional_string(
-            _member(record, "created_by_login", label), f"{label} actor"
-        )
-        occurred_at = _timestamp(_member(record, "created_at", label), label)
-        change = _change(
-            project=project,
-            change_id=change_id,
-            key=key,
-            locale=record_locale,
-            actor=actor or "API",
-            old_value=_optional_string(
-                _member(record, "text", label), f"{label} old value"
-            ),
-            new_value=_optional_string(
-                _member(record, "new_text", label), f"{label} new value"
-            ),
-            occurred_at=occurred_at,
-            label=label,
-        )
-        output.append((change_id, occurred_at, change))
-    if any(newer[1] < older[1] for newer, older in pairwise(output)):
+        output.append(revision)
+    if any(newer.occurred_at < older.occurred_at for newer, older in pairwise(output)):
         raise RuntimeError(f"{resource} is not ordered newest first")
-    return _ParsedChangePage(
-        number=number,
-        total_pages=total_pages,
-        records=tuple(output),
-    )
+    try:
+        return RevisionPage(
+            number=number,
+            total_pages=total_pages,
+            revisions=tuple(output),
+            cursor=output[-1].id if output else None,
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"{resource} is invalid: {exc}") from exc
 
 
-class NoctaliaClient:
-    """Read one project from Noctalia Translate."""
+class WebClient(HttpClient):
+    """Read current project data from Noctalia Translate.
+
+    Paginated queries fetch pages lazily. The default HTTP session retries
+    transient failures three times. Request and response-validation failures
+    raise :class:`RuntimeError` with the affected resource.
+    """
 
     def __init__(
         self,
         project: str,
         *,
-        timeout: float,
+        timeout: float = 30,
         session: requests.Session | None = None,
+        proxy: str | None = None,
     ) -> None:
-        if (
-            type(timeout) not in (int, float)
-            or not math.isfinite(timeout)
-            or timeout <= 0
-        ):
-            raise ValueError("timeout must be a positive finite number")
-        self._project = _text(project, "project")
-        self._timeout = timeout
+        """Select a website project and configure HTTP access.
+
+        ``timeout`` applies to each connection and read attempt. Supplied
+        sessions remain owned by the caller. ``proxy=None`` uses environment
+        settings; ``proxy=""`` connects directly. Configure supplied sessions
+        directly for proxy and retry policies.
+        """
+
+        super().__init__(project, timeout=timeout, session=session, proxy=proxy)
         encoded_project = quote(self._project, safe="")
         base = f"{_BASE_URL}/projects/{encoded_project}"
         self._project_url = f"{base}/__data.json"
@@ -751,26 +594,9 @@ class NoctaliaClient:
         self._missing_url = f"{api}/missing"
         self._reviews_url = f"{api}/outdated"
         self._changes_url = f"{api}/translations/history"
-        self._owns_session = session is None
-        self._session = session if session is not None else _create_session()
-
-    @property
-    def slug(self) -> str:
-        """Return the project identifier."""
-
-        return self._project
-
-    def translation_url(self, key: str, locale: str, /) -> str:
-        """Return the website translation page for one key and locale."""
-
-        return _translation_url(
-            self._project,
-            _text(key, "key"),
-            _text(locale, "locale"),
-        )
 
     def project(self) -> Project:
-        """Return public project metadata and current progress."""
+        """Return current project metadata and per-language progress."""
 
         payload = _request_json(
             self._session,
@@ -781,7 +607,10 @@ class NoctaliaClient:
         return _parse_project(payload, self._project)
 
     def keys(self, *, prefix: str | None = None) -> tuple[str, ...]:
-        """Return translation keys, optionally restricted to a hierarchy."""
+        """Return website keys, optionally restricted to a hierarchy.
+
+        ``prefix`` matches the exact key and descendants separated by ``.``.
+        """
 
         if prefix is not None:
             prefix = _text(prefix, "prefix")
@@ -797,9 +626,14 @@ class NoctaliaClient:
         boundary = f"{prefix}."
         return tuple(key for key in keys if key == prefix or key.startswith(boundary))
 
-    def catalog(self) -> dict[str, dict[str, str]]:
-        """Return the complete current catalog in key-first form."""
+    def catalog(self, *, locale: str | None = None) -> dict[str, dict[str, str]]:
+        """Return the complete export as ``{key: {locale: value}}``.
 
+        Nested JSON keys are joined with ``.``. Empty strings are preserved.
+        """
+
+        if locale is not None:
+            locale = _text(locale, "locale")
         payload = _request_json(
             self._session,
             self._export_url,
@@ -810,15 +644,15 @@ class NoctaliaClient:
         if SOURCE_LOCALE not in root:
             raise RuntimeError("Translation export does not contain the source locale")
         output: dict[str, dict[str, str]] = {}
-        for locale, tree in root.items():
-            if not locale.strip():
+        for language, tree in root.items():
+            if not language.strip():
                 raise RuntimeError("Translation export contains an invalid locale")
             if not isinstance(tree, dict):
-                raise RuntimeError(f"Invalid translation data for {locale!r}")
-            if not tree:
+                raise RuntimeError(f"Invalid translation data for {language!r}")
+            if not tree or (locale is not None and language != locale):
                 continue
             for key, value in _flatten(tree):
-                output.setdefault(key, {})[locale] = value
+                output.setdefault(key, {})[language] = value
         return output
 
     def translations(
@@ -828,7 +662,11 @@ class NoctaliaClient:
         *keys: str,
         locales: Iterable[str] | None = None,
     ) -> dict[str, dict[str, str]]:
-        """Return current values for exact keys."""
+        """Return current values for exact keys as ``{key: {locale: value}}``.
+
+        ``locales=None`` reads the project languages before fetching values.
+        Keys are fetched in batches.
+        """
 
         selected_keys = _keys((key, *keys), "keys")
         selected_locales = _locales(locales, "locales")
@@ -847,14 +685,18 @@ class NoctaliaClient:
             output.update(_parse_translations(payload, batch, selected_locales))
         return output
 
-    def search_translations(
+    def search(
         self,
         query: str,
         *,
         search_locale: str,
         locales: Iterable[str] | None = None,
     ) -> dict[str, dict[str, str]]:
-        """Search one language and return current values for matching keys."""
+        """Search key names and text in ``search_locale`` across all result pages.
+
+        ``locales`` selects the returned values and defaults to
+        ``search_locale``.
+        """
 
         query = _text(query, "query")
         search_locale = _text(search_locale, "search_locale")
@@ -889,7 +731,10 @@ class NoctaliaClient:
     def missing(
         self, locale: str, /, *, query: str | None = None
     ) -> tuple[Missing, ...]:
-        """Return untranslated keys and any available source text."""
+        """Return missing translations with available English source text.
+
+        ``query`` is forwarded to the website's search filter.
+        """
 
         locale = _text(locale, "locale")
         parameters: dict[str, int | str] = {"locale": locale}
@@ -922,7 +767,11 @@ class NoctaliaClient:
     def reviews(
         self, locale: str, /, *, query: str | None = None
     ) -> tuple[Review, ...]:
-        """Return translations whose source changed after they were saved."""
+        """Return translations whose English source needs review.
+
+        ``query`` is forwarded to the website's search filter. A review entry
+        without its saved target translation raises :class:`RuntimeError`.
+        """
 
         locale = _text(locale, "locale")
         parameters: dict[str, int | str] = {"locale": locale}
@@ -966,7 +815,10 @@ class NoctaliaClient:
         *keys: str,
         locale: str,
     ) -> tuple[Change, ...]:
-        """Return complete changes for exact keys in one language."""
+        """Return complete website history for the selected keys and language.
+
+        Results are newest first, with equal timestamps ordered by identifier.
+        """
 
         selected_keys = _keys((key, *keys), "keys")
         locale = _text(locale, "locale")
@@ -991,14 +843,25 @@ class NoctaliaClient:
         after: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> Iterator[Change]:
-        """Yield the project change stream from newest to oldest."""
+        """Yield project changes from newest to oldest.
+
+        ``since`` and ``until`` are inclusive, timezone-aware bounds.
+        ``after`` excludes that raw revision and all older records.
+
+        Args:
+            on_progress: Called with the current and total page numbers after
+                each fetched page.
+
+        Raises:
+            RuntimeError: ``after`` cannot be found in the website history.
+        """
 
         if locale is not None:
             locale = _text(locale, "locale")
         if since is not None:
-            since = _boundary(since, "since")
+            since = _utc(since, "since")
         if until is not None:
-            until = _boundary(until, "until")
+            until = _utc(until, "until")
         if since is not None and until is not None and since > until:
             raise ValueError("since must not be later than until")
         if after is not None:
@@ -1018,12 +881,32 @@ class NoctaliaClient:
         start_page: int = 1,
         cursor: str | None = None,
     ) -> Iterator[ChangePage]:
-        """Yield validated pages from the project change stream.
+        """Yield normalized change pages in website order.
 
-        ``cursor`` identifies a raw website record.  The record and all
-        newer records are discarded, so the first yielded page continues with
-        older records.  This is useful for callers that persist page
-        checkpoints without exposing the website response format.
+        Empty-text revisions are omitted from ``changes`` while ``cursor``
+        retains the raw continuation position. See :meth:`revision_pages`
+        for cursor and starting-page semantics.
+        """
+
+        return self._change_pages(
+            self.revision_pages(locale=locale, start_page=start_page, cursor=cursor)
+        )
+
+    def revision_pages(
+        self,
+        *,
+        locale: str | None = None,
+        start_page: int = 1,
+        cursor: str | None = None,
+    ) -> Iterator[RevisionPage]:
+        """Yield raw revision pages from newest to oldest.
+
+        ``cursor`` excludes that revision and newer records. ``start_page`` is
+        a hint for locating it when website pages shift. Without a cursor,
+        reading begins at ``start_page``.
+
+        Raises:
+            RuntimeError: The cursor cannot be found.
         """
 
         if locale is not None:
@@ -1032,28 +915,7 @@ class NoctaliaClient:
             raise ValueError("start_page must be a positive integer")
         if cursor is not None:
             cursor = _text(cursor, "cursor")
-        return self._change_pages(
-            locale=locale,
-            start_page=start_page,
-            cursor=cursor,
-        )
-
-    def close(self) -> None:
-        """Close the HTTP session when it belongs to this client."""
-
-        if self._owns_session:
-            self._session.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.close()
+        return self._revision_pages(locale=locale, start_page=start_page, cursor=cursor)
 
     def _iter_changes(
         self,
@@ -1065,86 +927,90 @@ class NoctaliaClient:
         on_progress: Callable[[int, int], None] | None,
     ) -> Iterator[Change]:
         pending: list[Change] = []
-        anchor_found = after is None
-        for result in self.change_pages(locale=locale):
+        for result in self.revision_pages(locale=locale):
             if on_progress is not None:
                 on_progress(result.number, result.total_pages)
-            for change in result.changes:
-                if after is not None and not anchor_found:
-                    if change.id == after:
-                        anchor_found = True
-                        break
-                    if (since is None or change.occurred_at >= since) and (
-                        until is None or change.occurred_at <= until
-                    ):
-                        pending.append(change)
-                    continue
-                if since is not None and change.occurred_at < since:
+            for revision in result.revisions:
+                if revision.id == after:
+                    yield from pending
                     return
-                if until is None or change.occurred_at <= until:
-                    if after is not None:
-                        pending.append(change)
-                    else:
+                if since is not None and revision.occurred_at < since:
+                    if after is None:
+                        return
+                    continue
+                if until is not None and revision.occurred_at > until:
+                    continue
+                change = revision.change(self.slug)
+                if change is not None:
+                    if after is None:
                         yield change
-            if after is not None and not anchor_found and result.cursor == after:
-                anchor_found = True
-            if after is not None and anchor_found:
-                yield from pending
-                return
-        if after is not None and not anchor_found:
+                    else:
+                        pending.append(change)
+        if after is not None:
             raise RuntimeError(f"Change {after!r} was not found in the project stream")
 
-    def _change_pages(
+    def _revision_pages(
         self,
         *,
         locale: str | None,
         start_page: int,
         cursor: str | None,
-    ) -> Iterator[ChangePage]:
+    ) -> Iterator[RevisionPage]:
         page = start_page
         seen: set[str] = set()
         previous_time: datetime | None = None
         anchor_found = cursor is None
         while True:
-            result = self._fetch_change_page(page, locale)
-            if result.total_pages == 0 or result.number > result.total_pages:
+            result = self._fetch_revision_page(page, locale)
+            if result.total_pages and result.number > result.total_pages:
                 break
-            unique_records: list[tuple[str, datetime, Change | None]] = []
-            for change_id, occurred_at, change in result.records:
-                if change_id in seen:
+            records: list[Revision] = []
+            for item in result.revisions:
+                if item.id in seen:
                     continue
-                if previous_time is not None and occurred_at > previous_time:
+                if previous_time is not None and item.occurred_at > previous_time:
                     raise RuntimeError("Recent Changes is not ordered newest first")
-                seen.add(change_id)
-                previous_time = occurred_at
-                unique_records.append((change_id, occurred_at, change))
-            records = tuple(unique_records)
-            if cursor is not None and not anchor_found:
-                for index, (change_id, _, _) in enumerate(records):
-                    if change_id == cursor:
+                seen.add(item.id)
+                previous_time = item.occurred_at
+                records.append(item)
+            if not anchor_found:
+                for index, item in enumerate(records):
+                    if item.id == cursor:
                         anchor_found = True
                         records = records[index + 1 :]
                         break
                 else:
-                    records = ()
-            yield result.to_page(records)
+                    records = []
+            if anchor_found:
+                yield replace(result, revisions=tuple(records))
             if result.number >= result.total_pages:
                 break
             page = result.number + 1
-        if cursor is not None and not anchor_found:
+        if not anchor_found:
             raise RuntimeError(
                 f"Change cursor {cursor!r} was not found in the project stream"
+            )
+
+    def _change_pages(self, pages: Iterator[RevisionPage]) -> Iterator[ChangePage]:
+        for result in pages:
+            if not result.total_pages:
+                return
+            yield ChangePage(
+                number=result.number,
+                total_pages=result.total_pages,
+                changes=tuple(
+                    change
+                    for item in result.revisions
+                    if (change := item.change(self.slug)) is not None
+                ),
+                cursor=result.cursor,
             )
 
     def _lookup_translations(
         self, keys: tuple[str, ...], locale: str
     ) -> dict[str, str]:
         if len(keys) > _CATALOG_LOOKUP_THRESHOLD:
-            values = self.catalog()
-            for key in keys:
-                text = values.get(key, {}).get(locale)
-                if text is not None:
-                    _string(text, f"Translation {key!r} {locale!r} text")
+            values = self.catalog(locale=locale)
         else:
             values = self.translations(*keys, locales=(locale,))
         return {
@@ -1163,7 +1029,7 @@ class NoctaliaClient:
         )
         return _parse_changes(payload, self._project, key, locale)
 
-    def _fetch_change_page(self, page: int, locale: str | None) -> _ParsedChangePage:
+    def _fetch_revision_page(self, page: int, locale: str | None) -> RevisionPage:
         parameters: dict[str, int | str] = {"changesPage": page}
         if locale is not None:
             parameters["changesLocale"] = locale
@@ -1174,9 +1040,9 @@ class NoctaliaClient:
             timeout=self._timeout,
             parameters=parameters,
         )
-        result = _parse_change_page(payload, self._project, locale)
+        result = _parse_revision_page(payload, self._project, locale)
         if result.number != page:
             raise RuntimeError("Recent Changes returned an unexpected page")
-        if page > result.total_pages and result.records:
+        if page > result.total_pages and result.revisions:
             raise RuntimeError("Recent Changes records do not match page count")
         return result
