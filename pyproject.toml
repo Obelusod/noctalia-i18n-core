@@ -1,7 +1,7 @@
 [project]
 name = "noctalia-i18n-core"
-version = "0.5.0"
-description = "Read project progress, current translations, and changes from Noctalia Translate"
+version = "0.6.0"
+description = "Unofficial typed Python clients for Noctalia Translate"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -21,6 +21,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "msgspec>=0.22.0",
   "requests>=2.32",
 ]
 
@@ -29,14 +30,27 @@ Homepage = "https://github.com/Obelusod/noctalia-i18n-core"
 Issues = "https://github.com/Obelusod/noctalia-i18n-core/issues"
 Source = "https://github.com/Obelusod/noctalia-i18n-core"
 
-[build-system]
-requires = ["hatchling>=1.27"]
-build-backend = "hatchling.build"
-
 [dependency-groups]
 dev = [
-  "pyrefly>=1.4.0",
-  "ruff>=0.16.2",
+  "pyrefly>=1.4.1",
+  "ruff>=0.17.4",
+]
+
+[build-system]
+requires = ["hatchling>=1.33.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["noctalia_i18n_core"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "LICENSE",
+  "README.md",
+  "README.zh-CN.md",
+  "noctalia_i18n_core",
+  "pyproject.toml",
+  "tests",
 ]
 
 [tool.pyrefly]
@@ -64,20 +78,24 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = [
-  "A", "ANN", "ARG", "B", "C4", "E4", "E7", "E9", "F", "I", "PGH003",
-  "RUF006", "RUF007", "RUF008", "RUF009", "RUF012", "RUF013", "RUF100",
-  "SIM", "UP",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["noctalia_i18n_core"]
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "LICENSE",
-  "README.md",
-  "README.zh-CN.md",
-  "noctalia_i18n_core",
-  "pyproject.toml",
-  "tests",
+  "A",
+  "ANN",
+  "ARG",
+  "B",
+  "C4",
+  "E4",
+  "E7",
+  "E9",
+  "F",
+  "I",
+  "PGH003",
+  "RUF006",
+  "RUF007",
+  "RUF008",
+  "RUF009",
+  "RUF012",
+  "RUF013",
+  "RUF100",
+  "SIM",
+  "UP",
 ]

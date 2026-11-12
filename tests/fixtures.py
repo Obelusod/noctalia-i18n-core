@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import deque
 from typing import override
 
@@ -15,12 +16,9 @@ type JsonValue = (
 class Response(requests.Response):
     def __init__(self, payload: object, status: int = 200) -> None:
         super().__init__()
-        self._payload = payload
+        self._content = json.dumps(payload, ensure_ascii=False).encode()
+        self._content_consumed = True
         self.status_code = status
-
-    @override
-    def json(self, **kwargs: object) -> object:
-        return self._payload
 
 
 class Session(requests.Session):

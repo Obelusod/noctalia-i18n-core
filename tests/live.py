@@ -8,7 +8,7 @@ from typing import override
 
 import requests
 
-from noctalia_i18n_core import SOURCE_LOCALE, NoctaliaClient
+from noctalia_i18n_core import SOURCE_LOCALE, WebClient
 
 _PROJECTS_URL = "https://i18n.noctalia.dev/projects"
 
@@ -43,7 +43,7 @@ def _projects() -> tuple[str, ...]:
 
 class LiveTests(unittest.TestCase):
     def _verify_project(self, slug: str) -> None:
-        with NoctaliaClient(slug, timeout=30) as client:
+        with WebClient(slug, timeout=30) as client:
             project = client.project()
             keys = client.keys()
             catalog = client.catalog()
@@ -60,7 +60,7 @@ class LiveTests(unittest.TestCase):
             self.assertEqual(values[key][SOURCE_LOCALE], source_value)
             self.assertIn(
                 key,
-                client.search_translations(
+                client.search(
                     key,
                     search_locale=SOURCE_LOCALE,
                     locales=(SOURCE_LOCALE,),

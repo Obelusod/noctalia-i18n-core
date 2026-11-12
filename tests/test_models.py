@@ -20,7 +20,7 @@ def _change(
         key="settings.widgets.settings.scroll-repeat.description",
         locale="zh-Hans",
         action=action,
-        actor="Obelusod",
+        actor="fixture",
         old_value=old_value,
         new_value=new_value,
         occurred_at=datetime(2026, 1, 1, tzinfo=UTC),

@@ -10,12 +10,17 @@ def main() -> None:
     required = {
         "Change",
         "ChangeAction",
+        "ChangeBatch",
+        "CollectionStatus",
+        "DataClient",
         "ChangePage",
         "Locale",
         "Missing",
-        "NoctaliaClient",
+        "WebClient",
         "Project",
         "Review",
+        "Revision",
+        "RevisionPage",
         "SOURCE_LOCALE",
     }
     if set(noctalia_i18n_core.__all__) != required:
@@ -33,14 +38,15 @@ def main() -> None:
         "missing",
         "project",
         "reviews",
-        "search_translations",
+        "revision_pages",
+        "search",
         "translation_url",
         "translations",
     )
     missing_methods = tuple(
         name
         for name in methods
-        if not callable(getattr(noctalia_i18n_core.NoctaliaClient, name, None))
+        if not callable(getattr(noctalia_i18n_core.WebClient, name, None))
     )
     if missing_methods:
         raise RuntimeError(f"The client API is incomplete: {missing_methods!r}")
